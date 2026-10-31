@@ -272,13 +272,6 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
   void _fail(String message) => _progressController.setError(message);
 
-  Future<String> _getCookieHeader() async {
-    final cookies = await CookieManager.instance().getCookies(
-      url: WebUri(widget.workUrl),
-    );
-    return cookies.map((c) => '${c.name}=${c.value}').join('; ');
-  }
-
   /// 题型别名归一化
   String _canonicalType(dynamic raw) {
     final key = (raw ?? '').toString().trim().toLowerCase().replaceAll(' ', '');
@@ -351,7 +344,6 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         SolvingStage.thinking,
         logMessage: '正在请求 AI 分析（${solvableQuestions.length} 道题）...',
       );
-      final cookieHeader = await _getCookieHeader();
 
       final List<Map<String, dynamic>> answers;
       try {
@@ -359,8 +351,6 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
             .solveQuestions(
               questions: solvableQuestions,
               models: AppConfig.getLlmModels(),
-              cookieHeader: cookieHeader,
-              userAgent: _desktopUA,
               onLog: _log,
             )
             .timeout(const Duration(seconds: 100));
@@ -515,7 +505,11 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
   /// 比对运行前后的页面指纹，把结论打到日志面板上
   void _reportFingerprint(String before, String after) {
-    if (before.isEmpty || after.isEmpty) return;
+    // 采不到就不装「一切正常」：明确告诉用户这次没能自证
+    if (before.isEmpty || after.isEmpty) {
+      _log('⚠️ 指纹采集失败，本次无法自证网页未修改');
+      return;
+    }
 
     if (before == after) {
       _log('🔒 页面指纹一致 $before —— 网页未被修改');
@@ -1072,6 +1066,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                 _syncCanGoBack();
               },
               onUpdateVisitedHistory: (controller, url, isReload) {
+                // SPA 站内跳转不一定触发 onLoadStop，这里也清一次，
+                // 否则「提取本页作业」可能拿到上一个页面的旧快照。
+                _frameHtmls.clear();
+                _frameTitles.clear();
                 _currentPageUrl = url?.toString();
                 _syncCanGoBack();
               },

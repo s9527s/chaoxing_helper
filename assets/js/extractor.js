@@ -144,15 +144,59 @@
         return !!el.querySelector('.edui-body, .edui-editor, iframe[id^="ueditor"]');
     }
 
+    /** 题干开头 40 字：题型只在开头判断，避免正文里出现「多选」就被带偏 */
+    function headOf(block) {
+        for (var s = 0; s < TITLE_SELECTORS.length; s++) {
+            var els = toArray(block.querySelectorAll(TITLE_SELECTORS[s]));
+            for (var i = 0; i < els.length; i++) {
+                var text = textOf(els[i]);
+                if (text) return text.slice(0, 40);
+            }
+        }
+        return textOf(block).slice(0, 40);
+    }
+
+    /** 题干前缀 → 题型（顺序有意义：多选/判断要先于泛化的单选词） */
+    var HEAD_TYPE_RULES = [
+        {
+            type: 'multiple',
+            re: /^(?:[一二三四五六七八九十]+[、.．)）]|\d+[、.．)）])?\s*(?:多项选择|多选|不定项)/
+        },
+        {
+            type: 'judge',
+            re: /^(?:[一二三四五六七八九十]+[、.．)）]|\d+[、.．)）])?\s*判断/
+        },
+        {
+            type: 'fill',
+            re: /^(?:[一二三四五六七八九十]+[、.．)）]|\d+[、.．)）])?\s*(?:填空|简答|问答|名词解释|论述|计算|分析|翻译|写作|作文|材料|综合)/
+        },
+        {
+            type: 'single',
+            re: /^(?:[一二三四五六七八九十]+[、.．)）]|\d+[、.．)）])?\s*(?:单项选择|单选)/
+        }
+    ];
+
+    /**
+     * 题型判定：**先看控件，再看题干前缀**。
+     *
+     * 旧实现用全文 indexOf 找「多选 / 判断」，只要正文或选项里出现这两个词
+     * 就会把整道题带偏（比如单选题的选项文本里写了「多选」）。
+     * 现在按可信度从高到低：
+     *  1. `input[type=checkbox]` → 多选（学习通多选就是 checkbox，最可靠）
+     *  2. 题干前缀命中「判断」 → 判断（判断题用的也是 radio，只能靠前缀区分）
+     *  3. 题干前缀命中其他题型 → 对应类型
+     *  4. 只有 radio 且无前缀 → 单选
+     *  5. 有作答区（含富文本编辑器）→ 填空/简答
+     */
     function detectType(block) {
-        var text = textOf(block);
-        if (text.indexOf('多选') !== -1 || text.indexOf('多项选择') !== -1) return 'multiple';
-        if (text.indexOf('判断') !== -1) return 'judge';
-        if (text.indexOf('填空') !== -1) return 'fill';
-        if (text.indexOf('简答') !== -1 || text.indexOf('问答') !== -1) return 'fill';
-        if (text.indexOf('名词解释') !== -1 || text.indexOf('论述') !== -1) return 'fill';
-        if (text.indexOf('翻译') !== -1 || text.indexOf('写作') !== -1 || text.indexOf('作文') !== -1) return 'fill';
         if (block.querySelector('input[type="checkbox"]')) return 'multiple';
+
+        var head = headOf(block);
+        for (var r = 0; r < HEAD_TYPE_RULES.length; r++) {
+            if (HEAD_TYPE_RULES[r].re.test(head)) return HEAD_TYPE_RULES[r].type;
+        }
+
+        if (block.querySelector('input[type="radio"]')) return 'single';
         if (hasAnswerArea(block)) return 'fill';
         return 'single';
     }

@@ -3,6 +3,12 @@ import 'package:dio/dio.dart';
 
 import '../../core/config/app_config.dart';
 
+/// AI 解题服务：只发**一次** POST 到用户自己配置的模型接口。
+///
+/// 刻意只支持纯文字：
+///  - 题干与选项都来自 `extractor.js` 的只读文本提取；
+///  - **不下载任何页面资源**（图片/附件），因此这里不存在任何带 Cookie 的 GET；
+///  - 除这一个 POST 之外，本类不发任何网络请求。
 class AiSolverService {
   final Dio _dio = Dio(
     BaseOptions(
@@ -11,60 +17,16 @@ class AiSolverService {
     ),
   );
 
-  Future<String?> _downloadImageAsBase64({
-    required String imageUrl,
-    required String cookieHeader,
-    required String userAgent,
-    void Function(String)? onLog,
-  }) async {
-    try {
-      final response = await _dio.get<List<int>>(
-        imageUrl,
-        options: Options(
-          responseType: ResponseType.bytes,
-          headers: {
-            'Cookie': cookieHeader,
-            'Referer': 'https://mooc1.chaoxing.com/',
-            'User-Agent': userAgent,
-          },
-        ),
-      );
-      final bytes = response.data;
-      if (response.statusCode == 200 && bytes != null && bytes.isNotEmpty) {
-        final base64Str = base64Encode(bytes);
-        final lowerUrl = imageUrl.toLowerCase();
-        final mimeType = (lowerUrl.contains('.jpg') || lowerUrl.contains('.jpeg')) ? 'image/jpeg' : 'image/png';
-        return 'data:$mimeType;base64,$base64Str';
-      }
-    } catch (e) {
-      onLog?.call('⚠️ 图片下载失败，已跳过: $imageUrl ($e)');
-    }
-    return null;
-  }
-
   Future<List<Map<String, dynamic>>> solveQuestions({
     required List<Map<String, dynamic>> questions,
     /// 模型列表，按顺序依次尝试，前一个失败自动换下一个
     required List<LlmModel> models,
-    required String cookieHeader,
-    required String userAgent,
     void Function(String)? onLog,
-    void Function(int current, int total)? onImageProgress,
   }) async {
-    int totalImages = 0;
-    for (final q in questions) {
-      if (q['skip'] == true) continue;
-      totalImages += ((q['stemImages'] as List?) ?? []).length;
-      for (final opt in (q['options'] as List? ?? [])) {
-        totalImages += ((opt['images'] as List?) ?? []).length;
-      }
-    }
-
-    int processedImages = 0;
     final List<Map<String, dynamic>> contentParts = [
       {
         'type': 'text',
-        'text': '你是一个专业的大学课程解题助手。请根据提供的题目文本和配图作答。\n'
+        'text': '你是一个专业的大学课程解题助手。请根据提供的题目文本作答。\n'
             '请严格只输出 JSON 数组，不要包含 ```json 代码块或任何多余解释。\n'
             '输出格式示例：\n'
             '[{"index": 1, "type": "single", "answer": "B"}, '
@@ -74,34 +36,14 @@ class AiSolverService {
 
     for (final q in questions) {
       if (q['skip'] == true) continue;
-      final List<String> currentQuestionBase64List = [];
-      final stemImgs = List<String>.from(q['stemImages'] ?? []);
-      for (final url in stemImgs) {
-        final b64 = await _downloadImageAsBase64(imageUrl: url, cookieHeader: cookieHeader, userAgent: userAgent, onLog: onLog);
-        processedImages++;
-        onImageProgress?.call(processedImages, totalImages);
-        if (b64 != null) currentQuestionBase64List.add(b64);
-      }
       final options = List<Map<String, dynamic>>.from(
         (q['options'] as List? ?? []).map((e) => Map<String, dynamic>.from(e as Map)),
       );
-      for (final opt in options) {
-        final optImgs = List<String>.from(opt['images'] ?? []);
-        for (final url in optImgs) {
-          final b64 = await _downloadImageAsBase64(imageUrl: url, cookieHeader: cookieHeader, userAgent: userAgent, onLog: onLog);
-          processedImages++;
-          onImageProgress?.call(processedImages, totalImages);
-          if (b64 != null) currentQuestionBase64List.add(b64);
-        }
-      }
       final optionsSummary = options.map((o) => '${o['label']}: ${o['text']}').join(' | ');
       contentParts.add({
         'type': 'text',
         'text': '\n【第 ${q['index']} 题】题型: ${q['type']}\n题干: ${q['stem']}\n选项: $optionsSummary'
       });
-      for (final b64Uri in currentQuestionBase64List) {
-        contentParts.add({'type': 'image_url', 'image_url': {'url': b64Uri}});
-      }
     }
 
     // 只有填了 Key 的模型才真正可用
@@ -155,7 +97,12 @@ class AiSolverService {
         final brief = body.length > 120 ? body.substring(0, 120) : body;
         return 'HTTP $code $brief';
       }
-      return error.message ?? '网络异常';
+      final message = error.message ?? '网络异常';
+      // Android 9+ 起明文 HTTP 被系统直接拦掉，这里翻译成人话
+      if (message.toUpperCase().contains('CLEARTEXT')) {
+        return '地址必须是 https://（本应用禁止明文 HTTP）';
+      }
+      return message;
     }
     return error.toString();
   }

@@ -6,8 +6,9 @@
         android:label="AI阅读器"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
-        <!-- 注意上面加上了 usesCleartextTraffic，允许加载 http 图片 -->
+        android:usesCleartextTraffic="false">
+        <!-- 禁止明文 HTTP：Cookie / API Key 绝不允许走 http:// 传输。
+             用户手填 http:// 的模型地址会直接请求失败，这是刻意的。 -->
 
         <activity
             android:name=".MainActivity"

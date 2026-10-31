@@ -239,6 +239,40 @@ console.log('— 嵌套 TiMu：分组标题里套两个独立大题 —');
   ]);
 }
 
+console.log('— 题型判定：先看控件，再看题干前缀 —');
+{
+  // 单选题的选项文本里出现「多选」，旧实现全文 indexOf 会把它判成多选
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">下列关于「多选」的说法，正确的是？</div>
+      <ul class="Zy_ulTop"><li>A. 多选只能选一个</li><li>B. 多选可选多个</li></ul>
+      <input type="radio" name="q1">
+    </div>`;
+  const { payload } = run(html);
+  check('正文出现「多选」但只有 radio → 单选', payload.questions[0].type, 'single');
+}
+
+{
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">1. 下列哪些属于操作系统？</div>
+      <ul class="Zy_ulTop"><li>A. Linux</li><li>B. Word</li></ul>
+      <input type="checkbox" name="q2">
+    </div>`;
+  const { payload } = run(html);
+  check('勾选框 → 多选', payload.questions[0].type, 'multiple');
+}
+
+{
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">判断题：地球是圆的。</div>
+      <input type="radio" name="q3">
+    </div>`;
+  const { payload } = run(html);
+  check('radio + 题干前缀「判断」→ 判断', payload.questions[0].type, 'judge');
+}
+
 console.log('— 只读性检查 —');
 {
   const html = `

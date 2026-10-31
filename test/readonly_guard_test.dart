@@ -154,6 +154,35 @@ void main() {
     });
   });
 
+  group('附加：AI 服务只发文字，不下载页面资源', () {
+    test('ai_solver_service 里没有任何图片/base64 处理', () {
+      final src = File('lib/data/services/ai_solver_service.dart').readAsStringSync();
+      // 旧实现会带 Cookie 去 GET 图片再 base64，属于「绝对只读」之外的多余出口
+      for (final banned in <String>[
+        'base64',
+        'image_url',
+        'stemImages',
+        'ResponseType.bytes',
+        'downloadImage',
+      ]) {
+        expect(
+          src.contains(banned),
+          isFalse,
+          reason: 'ai_solver_service 里不该再出现 $banned',
+        );
+      }
+    });
+
+    test('lib 下不存在任何图片下载方法', () {
+      final hits = scan(collect('lib', <String>['.dart']), <RegExp>[
+        RegExp(r'[Dd]ownloadImage'),
+        RegExp(r'base64Encode'),
+        RegExp(r'image_url'),
+      ]);
+      expect(hits, isEmpty, reason: '仍存在图片/base64 相关代码：\n${hits.join('\n')}');
+    });
+  });
+
   group('红线三：仓库里没有真凭据', () {
     test('源码与脚本里没有 sk- 开头的长串密钥', () {
       final files = <File>[

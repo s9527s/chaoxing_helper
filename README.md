@@ -147,7 +147,9 @@ SuperStarInfoFetch 的 `a_get_course_info_of_type('works')`）实现「全部课
 2. 使用本项目可能违反你所处学校/机构的学术规范与平台用户协议，**风险由使用者自行承担**。
    本项目不鼓励、也不为「代做作业 / 考试作弊」等行为提供支持。
 3. 请勿用于任何考试、测验、限时测评等场景。
-4. API Key 以明文保存在本机 `SharedPreferences`，请勿在公用设备上填写。
+4. **API Key 和登录 Cookie 均以明文保存在本机 `SharedPreferences`**，未做加密。
+   请勿在公用 / root 过的设备上填写，也不要随意备份该应用的 `shared_prefs` 目录。
+   网络请求一律走 HTTPS（`android:usesCleartextTraffic="false"`），手填 `http://` 的模型地址会直接失败。
 5. 代码以学习为目的开源，**不提供任何可用性保证**，也不承诺适配平台后续改版。
 
 ---
