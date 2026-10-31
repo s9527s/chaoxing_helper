@@ -902,7 +902,7 @@ class _DashboardPageState extends State<DashboardPage> {
           _buildConfigField(
             label: 'API Key',
             initialValue: draft.apiKey,
-            hint: 'sk-...',
+            hint: '粘贴服务商控制台里的 API Key',
             obscure: draft.obscureKey,
             onChanged: (value) => draft.apiKey = value,
             suffix: IconButton(
