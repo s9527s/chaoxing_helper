@@ -51,6 +51,19 @@ Future<SolvingProgressController> _pump(
 /// 面板底部那个操作按钮
 Finder actionButton() => find.byType(FilledButton);
 
+/// 某个题号按钮的方块（AnimatedContainer 上带着选中态的颜色/渐变）
+AnimatedContainer chipOf(WidgetTester tester, int index) => tester.widget<AnimatedContainer>(
+      find.descendant(
+        of: find.byKey(ValueKey<String>('index-chip-$index')),
+        matching: find.byType(AnimatedContainer),
+      ),
+    );
+
+bool chipSelected(WidgetTester tester, int index) {
+  final decoration = chipOf(tester, index).decoration! as BoxDecoration;
+  return decoration.gradient != null;
+}
+
 void main() {
   setUp(() {
     _clipboard = '';
@@ -105,26 +118,92 @@ void main() {
     expect(find.textContaining('当前页没有题目'), findsOneWidget);
   });
 
-  testWidgets('没有答案时面板默认只占三成高度', (tester) async {
+  testWidgets('没有答案时面板比有答案时矮，不压住作业列表', (tester) async {
     await _pump(tester, stage: SolvingStage.idle);
+    final emptyHeight =
+        tester.getSize(find.byKey(const ValueKey<String>('panel'))).height;
 
-    final height = tester.getSize(find.byKey(const ValueKey<String>('panel'))).height;
-    // 容器高 800：无答案默认 0.30 → 约 240；有答案才是 0.45 → 约 360
-    expect(height, lessThan(300));
-    expect(height, greaterThan(200));
+    final controller = SolvingProgressController()..setStage(SolvingStage.completed);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 800,
+            child: AnswerFloatPanel(
+              controller: controller,
+              answers: _answers,
+              onStartPressed: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final filledHeight =
+        tester.getSize(find.byKey(const ValueKey<String>('panel'))).height;
+
+    // 容器高 800：无答案 0.30 → 240（但受最小可用高度 300 兜底），有答案 0.50 → 400
+    expect(emptyHeight, greaterThanOrEqualTo(300));
+    expect(emptyHeight, lessThan(filledHeight));
+    expect(filledHeight, 400);
+    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('有答案：渲染卡片，点复制写入剪贴板并提示', (tester) async {
+  testWidgets('题号栏：每题一个按钮，默认选中第 1 题并只显示它的答案', (tester) async {
     await _pump(tester, stage: SolvingStage.completed, answers: _answers);
 
-    expect(find.text('参考答案 2 条'), findsOneWidget);
-    expect(find.text('第 1 题 · 单选'), findsOneWidget);
-    expect(find.text('第 2 题 · 填空'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('index-bar')), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('index-chip-1')), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('index-chip-2')), findsOneWidget);
 
-    await tester.tap(find.text('复制').first);
+    // 默认第 1 题：按钮高亮，卡片只出第 1 题的答案
+    expect(chipSelected(tester, 1), isTrue);
+    expect(chipSelected(tester, 2), isFalse);
+    expect(find.text('第 1 题'), findsOneWidget);
+    expect(find.text('B'), findsOneWidget);
+    expect(find.text('北京、上海'), findsNothing);
+  });
+
+  testWidgets('点题号 2：按钮高亮切换，卡片换成第 2 题答案', (tester) async {
+    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
+
+    await tester.tap(find.byKey(const ValueKey<String>('index-chip-2')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(chipSelected(tester, 2), isTrue);
+    expect(chipSelected(tester, 1), isFalse);
+    expect(find.text('第 2 题'), findsOneWidget);
+    expect(find.text('北京、上海'), findsOneWidget);
+    expect(find.text('B'), findsNothing);
+
+    // 再点回第 1 题
+    await tester.tap(find.byKey(const ValueKey<String>('index-chip-1')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(chipSelected(tester, 1), isTrue);
+    expect(find.text('B'), findsOneWidget);
+    expect(find.text('北京、上海'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('详情卡复制按钮只复制当前这一题', (tester) async {
+    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
+
+    await tester.tap(find.byKey(const ValueKey<String>('index-chip-2')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('answer-detail')),
+        matching: find.text('复制'),
+      ),
+    );
     await tester.pump();
 
-    expect(_clipboard, 'B');
+    expect(_clipboard, '北京、上海');
     expect(find.text('已复制'), findsOneWidget);
   });
 
@@ -154,7 +233,7 @@ void main() {
     expect(find.byKey(const ValueKey<String>('panel-ball')), findsNothing);
     expect(find.byKey(const ValueKey<String>('panel')), findsOneWidget);
     // 展开后答案还在
-    expect(find.text('第 1 题 · 单选'), findsOneWidget);
+    expect(find.text('B'), findsOneWidget);
   });
 
   testWidgets('拖把手：往上拖变高，往下拖变矮', (tester) async {
@@ -200,80 +279,59 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('没有答案时展示日志与引导，而不是答案列表', (tester) async {
+  testWidgets('没有答案时展示日志与引导，而不是题号栏', (tester) async {
     final controller = await _pump(tester, stage: SolvingStage.idle);
     controller.addLog('🔒 页面指纹一致 {"fields":34} —— 网页未被修改');
     await tester.pump();
 
     // 出现在两处：日志列表一条 + 底部单行摘要一条
     expect(find.textContaining('页面指纹一致'), findsNWidgets(2));
+    expect(find.byKey(const ValueKey<String>('index-bar')), findsNothing);
     expect(find.text('复制'), findsNothing);
   });
 
-  testWidgets('双模式：默认详情铺开，切列表后只列题号，答案收起', (tester) async {
-    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
+  testWidgets('题目很多时题号栏换行滚动，不溢出', (tester) async {
+    final many = <AnswerEntry>[
+      for (var i = 1; i <= 12; i++)
+        AnswerEntry(index: i, typeLabel: '单选', answer: '答案 $i'),
+    ];
+    await _pump(tester, stage: SolvingStage.completed, answers: many);
 
-    // 默认详情模式：答案直接铺开
-    expect(find.byKey(const ValueKey<String>('mode-detail')), findsOneWidget);
-    expect(find.text('B'), findsOneWidget);
-    expect(find.text('北京、上海'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    // 列表模式：题号在，答案收起
-    expect(find.text('第 1 题 · 单选'), findsOneWidget);
-    expect(find.text('第 2 题 · 填空'), findsOneWidget);
-    expect(find.text('B'), findsNothing);
-    expect(find.text('北京、上海'), findsNothing);
-    expect(find.byIcon(Icons.keyboard_arrow_down_rounded), findsNWidgets(2));
-  });
-
-  testWidgets('列表模式：点题号手风琴展开，再点收起', (tester) async {
-    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
-    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    await tester.tap(find.text('第 2 题 · 填空'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    // 只展开第 2 题
-    expect(find.text('北京、上海'), findsOneWidget);
-    expect(find.text('B'), findsNothing);
-
-    // 每行标题栏都能直接复制（不用先展开、也不用滚到底）
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(const ValueKey<String>('answer-row-2')),
-        matching: find.text('复制'),
-      ),
-    );
-    await tester.pump();
-    expect(_clipboard, '北京、上海');
-
-    await tester.tap(find.text('第 2 题 · 填空'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('北京、上海'), findsNothing);
+    expect(find.byKey(const ValueKey<String>('index-chip-12')), findsOneWidget);
+    // 题号区限高，答案区仍有空间
+    final barHeight =
+        tester.getSize(find.byKey(const ValueKey<String>('index-bar'))).height;
+    expect(barHeight, lessThanOrEqualTo(90));
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('换一批答案后自动回到展开态并清空手风琴', (tester) async {
+  testWidgets('答案已把题干抄进去时，不再重复显示一遍题干', (tester) async {
+    const echo = <AnswerEntry>[
+      AnswerEntry(
+        index: 1,
+        typeLabel: '简答',
+        stem: '中国的首都是哪里？',
+        answer: '中国的首都是哪里？ 中国的首都是北京。',
+      ),
+    ];
+    await _pump(tester, stage: SolvingStage.completed, answers: echo);
+
+    // 题干只出现一次（在答案里），不会在卡片顶部再铺一段
+    expect(find.text('中国的首都是哪里？'), findsNothing);
+    expect(find.text('中国的首都是哪里？ 中国的首都是北京。'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('换一批答案后自动回到第 1 题', (tester) async {
     final controller = await _pump(
       tester,
       stage: SolvingStage.completed,
       answers: _answers,
     );
-    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
+    await tester.tap(find.byKey(const ValueKey<String>('index-chip-2')));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('第 1 题 · 单选'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('B'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.text('北京、上海'), findsOneWidget);
 
     // 页面把 answers 换成了新一批
     await tester.pumpWidget(
@@ -294,11 +352,11 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 250));
 
     expect(find.text('参考答案 1 条'), findsOneWidget);
-    // 手风琴已清空：列表模式下新答案也是收起的
-    expect(find.text('新答案'), findsNothing);
+    expect(find.text('新答案'), findsOneWidget);
+    expect(find.byKey(const ValueKey<String>('index-chip-2')), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

@@ -40,6 +40,7 @@ class CourseTask {
     required this.url,
     this.deadlineUnknown = false,
     this.identity,
+    this.status = '未知',
   });
 
   final String title;
@@ -54,7 +55,13 @@ class CourseTask {
   /// 稳定唯一标识（workId），用于跨次导入去重
   final String? identity;
 
+  /// 页面上的状态文案：未交 / 待交 / 已交 …
+  final String status;
+
   bool get highRisk => type.highRisk;
+
+  /// 是否仍是要做的待办（已交 / 待批阅的一律不算）
+  bool get isPending => HomeworkItem.isPendingStatus(status);
 
   bool get isExpired => !deadline.isAfter(DateTime.now());
 
@@ -306,6 +313,7 @@ class _DashboardPageState extends State<DashboardPage> {
         url: item.url,
         deadlineUnknown: item.deadline == null,
         identity: item.identity,
+        status: item.status,
       );
 
   /// 按课程分组（保持首次出现顺序）
@@ -364,12 +372,23 @@ class _DashboardPageState extends State<DashboardPage> {
     return list;
   }
 
-  int get _pendingCount => _courses.expand((c) => c.tasks).where((t) => !t.isExpired).length;
+  /// 待办数量：**只数未交/待交且还没过期**的任务
+  /// （已交 / 待批阅的已经在校验层被丢掉，这里再兜一层，防止脏数据混入计数）
+  int get _pendingCount => _courses
+      .expand((c) => c.tasks)
+      .where((t) => t.isPending && !t.isExpired)
+      .length;
 
-  int get _urgentCount =>
-      _courses.expand((c) => c.tasks).where((t) => _urgency(t, _now) == _Urgency.urgent).length;
+  /// 紧急数量：同样只数未交的（已交的再急也不用做了）
+  int get _urgentCount => _courses
+      .expand((c) => c.tasks)
+      .where((t) => t.isPending && _urgency(t, _now) == _Urgency.urgent)
+      .length;
 
-  int get _highRiskCount => _courses.expand((c) => c.tasks).where((t) => t.highRisk).length;
+  int get _highRiskCount => _courses
+      .expand((c) => c.tasks)
+      .where((t) => t.isPending && t.highRisk)
+      .length;
 
   String get _keyStatusText {
     final models = AppConfig.getLlmModels();
@@ -446,38 +465,36 @@ class _DashboardPageState extends State<DashboardPage> {
     _handleImported(imported);
   }
 
-  /// 接收 WorkWebViewPage 回传的作业并合并进看板
-  /// 导入手动提取到的作业：按 workId 去重 → 合并进缓存 → 落盘
+  /// 接收 WorkWebViewPage 回传的作业并写入看板。
+  ///
+  /// **覆盖式更新**（不再是取并集）：本次提取涉及到的课程，旧数据整批丢弃，
+  /// 只用网页最新结果替换；其他课程原样保留。规则细节见
+  /// [TaskStore.mergeExtraction]（纯函数，有单测）。
   Future<void> _handleImported(List<HomeworkItem>? items) async {
     if (items == null || items.isEmpty) return;
 
-    final existing = <String>{for (final item in _items) _identityOf(item)};
-    final merged = List<HomeworkItem>.of(_items);
-    var added = 0;
-
-    for (final item in items) {
-      if (!existing.add(_identityOf(item))) continue;
-      merged.add(item);
-      added++;
+    final merged = TaskStore.mergeExtraction(_items, items);
+    if (merged.added == 0) {
+      // 全是被过滤掉的脏数据：不覆盖、不清空，保持原样
+      if (!mounted) return;
+      _toast('本页没有「未交」的作业，本地缓存未改动');
+      return;
     }
 
     if (!mounted) return;
     setState(() {
-      _items = merged;
-      _courses = _groupByCourse(merged);
+      _items = merged.items;
+      _courses = _groupByCourse(merged.items);
       _now = DateTime.now();
     });
 
-    await TaskStore.save(merged);
+    await TaskStore.save(merged.items);
     if (!mounted) return;
-    _toast(added > 0 ? '已导入 $added 条作业，并保存到本地' : '这些作业已经在看板里了');
-  }
 
-  /// 去重用的稳定标识：workId 优先，没有就退回 url+title
-  String _identityOf(HomeworkItem item) {
-    final id = item.identity;
-    if (id != null && id.isNotEmpty) return id;
-    return '${item.url}|${item.title}';
+    final parts = <String>['已更新 ${merged.added} 条未交作业'];
+    if (merged.replaced > 0) parts.add('覆盖旧数据 ${merged.replaced} 条');
+    if (merged.dropped > 0) parts.add('过滤 ${merged.dropped} 条');
+    _toast(parts.join(' · '));
   }
 
   /// 清空本地缓存（二次确认，避免误触）
@@ -1595,6 +1612,10 @@ class _DashboardPageState extends State<DashboardPage> {
                           ),
                           const SizedBox(width: 8),
                           _buildTypeTag(task.type),
+                          if (_hasStatusText(task)) ...<Widget>[
+                            const SizedBox(width: 6),
+                            _buildStatusTag(task.status),
+                          ],
                         ],
                       ),
                     ],
@@ -1603,6 +1624,37 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// 页面给出了明确状态（未交/待交…）才显示，避免「未知」也占一个标签
+  bool _hasStatusText(CourseTask task) {
+    final value = task.status.trim();
+    return value.isNotEmpty && value != '未知';
+  }
+
+  /// 状态小标签：未交红字，其他中性灰
+  Widget _buildStatusTag(String raw) {
+    final value = raw.trim();
+    final pending = HomeworkItem.isPendingStatus(value);
+    final color = pending ? _urgentColor : _expiredColor;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        value,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w600,
+          color: color,
         ),
       ),
     );

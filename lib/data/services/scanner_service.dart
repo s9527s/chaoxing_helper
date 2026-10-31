@@ -54,6 +54,110 @@ class HomeworkItem {
           status.contains('已完成') ||
           status.contains('已提交');
 
+  /// 已结束/已失效的状态词：出现任一就绝不是待办
+  static const List<String> _closedStatusKeywords = <String>[
+    '待批阅',
+    '已批阅',
+    '批阅中',
+    '已交',
+    '已完成',
+    '已提交',
+    '已过期',
+    '已结束',
+    '已截止',
+    '已作废',
+    '已撤回',
+  ];
+
+  /// 待办状态词：页面明确写着这些就一定是待办
+  static const List<String> _pendingStatusKeywords = <String>[
+    '未交',
+    '待交',
+    '未提交',
+    '待提交',
+    '未完成',
+    '待完成',
+  ];
+
+  /// **严格**判定这条记录还算不算待办。
+  ///
+  /// 看板的待办数量只统计 true 的记录，所以这里宁可漏也不要多：
+  ///  - 状态里出现「已交 / 待批阅 / 已过期…」→ 直接 false；
+  ///  - 状态是「未交 / 待交 / 未提交…」→ true；
+  ///  - 页面没给状态（`未知` / 空）→ true，因为解析层已经用整行文本
+  ///    排除了「已交」「待批阅」这类行，能走到这里的都是没被标记结束的。
+  bool get isPending => isPendingStatus(status);
+
+  /// 状态文案 → 是否待办（供 CourseTask 等外部模型复用，避免重复实现）
+  static bool isPendingStatus(String status) {
+    final value = status.replaceAll(RegExp(r'\s+'), '');
+    if (value.isEmpty || value == '未知') return true;
+    if (_closedStatusKeywords.any(value.contains)) return false;
+    if (_pendingStatusKeywords.any(value.contains)) return true;
+    // 「进行中 / 未开始 / 待完成」等其他未结束状态也保留
+    return !value.contains('过期') && !value.contains('结束');
+  }
+
+  /// 跨次提取的稳定去重键。
+  ///
+  /// 不能直接用整条 URL：作业列表每次刷新都会带上新的 answerId / enc，
+  /// 同一个作业会以「不同 URL」再次出现，看板数量就会凭空虚增。
+  /// 所以优先级是 workId/examId → URL 里的 workId → 课程+标题+截止时间。
+  String get stableKey {
+    final raw = (identity ?? '').trim();
+    if (raw.startsWith('wid:') ||
+        raw.startsWith('eid:') ||
+        raw.startsWith('pid:') ||
+        raw.startsWith('sig:')) {
+      return raw;
+    }
+
+    final fromUrl = _keyFromUrl(url);
+    if (fromUrl != null) return fromUrl;
+
+    return signature;
+  }
+
+  /// 兜底签名：课程 + 标题 + 截止时间
+  String get signature =>
+      'sig:$courseName|$title|${deadline?.toIso8601String() ?? ''}';
+
+  /// 从作业地址里抠 workId / examId（列表页的 URL 上一定有）
+  static String? _keyFromUrl(String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) return null;
+    for (final entry in uri.queryParameters.entries) {
+      final key = entry.key.toLowerCase();
+      final value = entry.value.trim();
+      if (value.isEmpty) continue;
+      if (key == 'workid' || key == 'work_id') return 'wid:$value';
+      if (key == 'examid' || key == 'exam_id') return 'eid:$value';
+    }
+    return null;
+  }
+
+  /// 这条作业属于哪门课（`cid:课程|cls:班级`），用于「本次提取覆盖哪些旧数据」。
+  /// URL 上带不出课程信息时返回空列表。
+  List<String> get courseScopeKeys {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) return const <String>[];
+
+    var courseId = '';
+    var classId = '';
+    uri.queryParameters.forEach((key, value) {
+      switch (key.toLowerCase()) {
+        case 'courseid':
+          courseId = value.trim();
+        case 'clazzid':
+        case 'classid':
+          classId = value.trim();
+      }
+    });
+
+    if (courseId.isEmpty) return const <String>[];
+    return <String>['cid:$courseId|cls:$classId'];
+  }
+
   /// 序列化（供本地缓存使用）
   Map<String, dynamic> toJson() => <String, dynamic>{
         'courseName': courseName,
@@ -461,35 +565,12 @@ class ScannerService {
   /// 供「可见 WebView 抓取」使用：把当前页面的 outerHTML 直接解析成任务列表。
   /// 绕开作业列表页需要 enc 的问题——页面已经是用户手动打开好的。
   List<HomeworkItem> parseTasksFromHtml(String html, {String courseName = '本页作业'}) {
-    // 结构诊断：把常见容器的命中数打出来，便于定位真实作业行长什么样
-    try {
-      final doc = html_parser.parse(html);
-      final probes = <String>[
-        'li', 'li[data]', 'li[onclick]', '.overHidden2', '.status',
-        '.TiMu', '.ulDiv', 'iframe', 'a[href*="workId"]', '[onclick*="goTask"]',
-        'div[onclick]', '.work-item', '.bottomList li',
-      ];
-      final report = probes
-          .map((sel) => '$sel=${doc.querySelectorAll(sel).length}')
-          .join(', ');
-      debugPrint('[Scanner] 本页 DOM 诊断: $report');
-      // 把 iframe 段（真正的内容区）打出来，看清作业行长什么样
-      const boundary = '<!-- IFRAME_CONTENT_BOUNDARY -->';
-      final idx = html.indexOf(boundary);
-      if (idx >= 0) {
-        final iframeHtml = html.substring(idx).replaceAll(RegExp(r'\s+'), ' ');
-        debugPrint('[Scanner] iframe 段: ${iframeHtml.length} 字, 片段: ${iframeHtml.length > 1200 ? iframeHtml.substring(0, 1200) : iframeHtml}');
-      } else {
-        debugPrint('[Scanner] 未找到 iframe 分隔标记');
-      }
-    } catch (e) {
-      debugPrint('[Scanner] 诊断失败: $e');
-    }
-
-    return _parseCourseTasks(
+    final items = _parseCourseTasks(
       CourseRef(courseName: courseName, courseId: '', classId: ''),
       html,
     );
+    debugPrint('[Scanner] $courseName: 本页解析出 ${items.length} 条未交作业');
+    return items;
   }
 
   /// 供单元测试直接喂 HTML 片段，避免依赖网络。
@@ -564,24 +645,29 @@ class ScannerService {
         continue;
       }
 
-      // ---- 去重：优先 workId / examId，没有才退化到整条 URL ----
+      // ---- 去重：优先 workId / examId，没有才退化到「标题 + 截止时间」 ----
+      // 绝不用整条 URL：列表页每次刷新 URL 上的 answerId/enc 都会变，
+      // 同一个作业会被当成两条，看板数量就虚增了。
+      final kind = _inferKind(url: url, title: title);
+      final displayTitle = title.isEmpty ? kind.label : title;
       final taskKey = _extractTaskKey(url, node);
-      final identity = taskKey ?? 'url:$url';
+      final deadline = _tryParseDeadline(node.text);
+      final identity = taskKey ??
+          'sig:${course.courseName}|$displayTitle|'
+              '${deadline?.toIso8601String() ?? ''}';
       if (!seen.add(identity)) {
         duplicateCount++;
         continue;
       }
 
-      final kind = _inferKind(url: url, title: title);
-
       items.add(
         HomeworkItem(
           courseName: course.courseName,
-          title: title.isEmpty ? kind.label : title,
+          title: displayTitle,
           kind: kind,
           url: url,
           status: statusText.isEmpty ? '未知' : statusText,
-          deadline: _tryParseDeadline(node.text),
+          deadline: deadline,
           identity: taskKey,
         ),
       );

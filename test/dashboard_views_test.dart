@@ -8,14 +8,16 @@ CourseTask _task(
   String course,
   String title,
   TaskType type,
-  Duration left,
-) {
+  Duration left, {
+  String status = '未交',
+}) {
   return CourseTask(
     title: title,
     courseName: course,
     type: type,
     deadline: DateTime.now().add(left),
     url: 'https://mooc1.chaoxing.com/mock',
+    status: status,
   );
 }
 
@@ -184,6 +186,33 @@ void main() {
 
     expect(find.text('还没有课程入口'), findsOneWidget);
     expect(find.text('暂无待办数据'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('总待办只数「未交」：已交/待批阅的不进计数', (tester) async {
+    final courses = <CourseGroup>[
+      CourseGroup(
+        name: '英语四六级',
+        teacher: '共 5 份任务',
+        accent: const Color(0xFF3F6BE0),
+        tasks: <CourseTask>[
+          for (var i = 1; i <= 4; i++)
+            _task('英语四六级', '作业$i', TaskType.homework, const Duration(hours: 20)),
+          // 第 5 条已交：网页上不算未交，看板也不该 +1
+          _task(
+            '英语四六级',
+            '作业5（已交）',
+            TaskType.homework,
+            const Duration(hours: 20),
+            status: '已交',
+          ),
+        ],
+      ),
+    ];
+
+    await pumpDashboard(tester, courses: courses);
+
+    expect(find.text('总待办：4 项 · 紧急：4 项'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

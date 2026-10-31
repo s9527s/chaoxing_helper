@@ -3,12 +3,6 @@ import 'package:flutter/services.dart';
 
 enum SolvingStage { idle, extracting, thinking, completed, error }
 
-/// 答案的两种呈现方式
-///
-/// - [detail]：全部铺开，长文本一眼看全（默认）；
-/// - [list]：只列题号，点一条展开一条，长作文不会撑爆面板。
-enum AnswerPanelMode { list, detail }
-
 class SolvingProgressController extends ChangeNotifier {
   SolvingStage stage = SolvingStage.idle;
   int totalCount = 0;
@@ -82,7 +76,7 @@ class AnswerEntry {
   final String typeLabel;
   final String answer;
 
-  /// 题干，只作两行预览，复制时不包含
+  /// 题干，只作预览，复制时不包含
   final String stem;
 
   /// 复制全部时的文本片段
@@ -96,8 +90,9 @@ class AnswerEntry {
 ///    网页本身照样可以点、可以输入；
 ///  - **可拖拽**：顶部把手上下拖改变面板高度，最小化后的小球也能上下拖；
 ///  - **可最小化**：收成屏幕边缘的小球，点一下再展开；
-///  - **双模式**：列表模式（手风琴，一次只看一题）/ 详情模式（全部铺开）；
-///  - **一键复制**：每条答案右下角「复制」，标题栏有「复制全部」。
+///  - **题号遥控器**：顶部一排题号按钮 `[1] [2] [3]…`，点哪个看哪个，
+///    按钮高亮，下方卡片只渲染这一题的答案（长作文也不会撑爆面板）；
+///  - **一键复制**：详情卡右上角「复制」，顶栏有「复制全部」。
 class AnswerFloatPanel extends StatefulWidget {
   const AnswerFloatPanel({
     super.key,
@@ -124,8 +119,18 @@ class AnswerFloatPanel extends StatefulWidget {
 class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
   static const double _handleHeight = 22;
   static const double _headerHeight = 46;
-  static const double _minPanelHeight = 200;
+  /// 面板最矮高度：要同时容下把手(22) + 标题栏(46) + 题号区(≈45) +
+  /// 答案卡标题行(≈51) + 底部操作区(≈86)，再留一点正文空间。
+  /// 低于这个值答案卡就会被挤爆（RenderFlex overflow），所以直接兜底。
+  static const double _minPanelHeight = 300;
   static const double _ballSize = 54;
+
+  /// 题号按钮：38 见方，间距 7 —— 400 宽的面板一行正好 8 个
+  static const double _chipSize = 38;
+  static const double _chipGap = 7;
+
+  /// 题号区最多两行，再多就纵向滚动，别把答案区挤没
+  static const double _indexBarMaxHeight = _chipSize * 2 + _chipGap + 4;
 
   // M3 配色：主色蓝紫渐变，卡片纯白，底色浅灰
   static const Color _primary = Color(0xFF3D5AFE);
@@ -138,31 +143,36 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
   double? _ballTop;
   double _maxHeight = 640;
 
-  AnswerPanelMode _mode = AnswerPanelMode.detail;
-
-  /// 列表模式下已展开的题号（手风琴，可同时展开多条）
-  final Set<int> _expanded = <int>{};
+  /// 当前选中的题号（`AnswerEntry.index`）。null = 默认第一题
+  int? _selectedIndex;
 
   @override
   void didUpdateWidget(covariant AnswerFloatPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 新答案到达时自动展开到「看答案」的高度，免得用户以为没生成
+
+    // 新答案到达：展开到「看答案」的高度，并回到第 1 题
     if (widget.answers.isNotEmpty &&
         !identical(widget.answers, oldWidget.answers)) {
       _minimized = false;
       _height = null;
-      _expanded.clear();
+      _selectedIndex = null;
     }
     // 清空答案（换作业了）时收回「待提取」高度
     if (widget.answers.isEmpty && oldWidget.answers.isNotEmpty) {
       _height = null;
-      _expanded.clear();
+      _selectedIndex = null;
+    }
+    // 选中的题不在这批答案里了（重新分析后题目变了）→ 回到第一题
+    if (_selectedIndex != null &&
+        !widget.answers.any((e) => e.index == _selectedIndex)) {
+      _selectedIndex = null;
     }
   }
 
-  /// 没有答案时只占三成屏幕（别压住作业列表），有答案时才铺开到四成半
+  /// 没有答案时只占三成屏幕（别压住作业列表），有答案时才铺开到一半
+  /// （题号栏占掉约 45 的高度，所以比只有列表时多给一点）
   double get _defaultHeight {
-    final ratio = widget.answers.isEmpty ? 0.30 : 0.45;
+    final ratio = widget.answers.isEmpty ? 0.30 : 0.50;
     return _maxHeight * ratio;
   }
 
@@ -178,6 +188,18 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
     final upper = _maxHeight - _ballSize - 30;
     if (upper <= 90) return 90;
     return value.clamp(90, upper);
+  }
+
+  /// 当前该显示哪一题：选中项优先，否则第一题
+  AnswerEntry? get _selectedEntry {
+    if (widget.answers.isEmpty) return null;
+    final index = _selectedIndex;
+    if (index != null) {
+      for (final entry in widget.answers) {
+        if (entry.index == index) return entry;
+      }
+    }
+    return widget.answers.first;
   }
 
   @override
@@ -262,8 +284,10 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
     );
   }
 
-  /// 把手 + 标题栏 + 模式切换，共用一层主题色渐变底
+  /// 把手 + 标题栏 + 题号栏，共用一层主题色渐变底
   Widget _buildTopBar() {
+    final selected = _selectedEntry;
+
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -276,10 +300,15 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
         ),
       ),
       child: Column(
+        // 拉伸：题号栏要占满整行并左对齐，不然 Wrap 会按内容宽度居中
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           _buildHandle(),
           _buildHeader(),
-          if (widget.answers.isNotEmpty) _buildModeBar(),
+          if (selected != null) ...<Widget>[
+            _buildIndexBar(selected.index),
+            const _TopBarTail(),
+          ],
         ],
       ),
     );
@@ -349,9 +378,7 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
             const SizedBox(width: 9),
             Flexible(
               child: Text(
-                hasAnswers
-                    ? '参考答案 ${widget.answers.length} 条'
-                    : 'AI 阅读助手',
+                hasAnswers ? '参考答案 ${widget.answers.length} 条' : 'AI 阅读助手',
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 15,
@@ -381,72 +408,74 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
     );
   }
 
-  /// 列表 / 详情：整行等宽分段控件，点哪儿都算
-  Widget _buildModeBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.all(3),
-        decoration: BoxDecoration(
-          color: const Color(0x0F000000),
-          borderRadius: BorderRadius.circular(13),
-        ),
-        child: Row(
+  // ---------------- 题号栏（遥控器） ----------------
+
+  /// 横向排布的题号按钮：点哪个高亮哪个，下方卡片立刻切成那一题
+  Widget _buildIndexBar(int selectedIndex) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: _indexBarMaxHeight),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        child: Wrap(
+          key: const ValueKey<String>('index-bar'),
+          spacing: _chipGap,
+          runSpacing: _chipGap,
           children: <Widget>[
-            Expanded(
-              child: _buildModeTab(AnswerPanelMode.list, Icons.view_list_rounded, '列表'),
-            ),
-            const SizedBox(width: 4),
-            Expanded(
-              child: _buildModeTab(AnswerPanelMode.detail, Icons.article_outlined, '详情'),
-            ),
+            for (final entry in widget.answers)
+              _buildIndexChip(entry, selected: entry.index == selectedIndex),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildModeTab(AnswerPanelMode mode, IconData icon, String label) {
-    final selected = _mode == mode;
+  Widget _buildIndexChip(AnswerEntry entry, {required bool selected}) {
     return GestureDetector(
-      key: ValueKey<String>('mode-${mode.name}'),
+      key: ValueKey<String>('index-chip-${entry.index}'),
       behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _mode = mode),
+      onTap: () => setState(() => _selectedIndex = entry.index),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOut,
+        width: _chipSize,
+        height: _chipSize,
+        alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: selected ? Colors.white : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
+          gradient: selected
+              ? const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: <Color>[_primary, _accent],
+                )
+              : null,
+          color: selected ? null : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: selected
+              ? null
+              : Border.all(color: const Color(0x1A000000), width: 1),
           boxShadow: selected
               ? const <BoxShadow>[
                   BoxShadow(
-                    color: Color(0x1A1B1B1F),
-                    blurRadius: 6,
-                    offset: Offset(0, 2),
+                    color: Color(0x4D3D5AFE),
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
                   ),
                 ]
-              : null,
+              : const <BoxShadow>[
+                  BoxShadow(
+                    color: Color(0x0A1B1B1F),
+                    blurRadius: 5,
+                    offset: Offset(0, 2),
+                  ),
+                ],
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            Icon(
-              icon,
-              size: 15,
-              color: selected ? _primary : const Color(0x8A000000),
-            ),
-            const SizedBox(width: 5),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selected ? _primary : const Color(0x8A000000),
-              ),
-            ),
-          ],
+        child: Text(
+          '${entry.index}',
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w700,
+            color: selected ? Colors.white : _ink,
+          ),
         ),
       ),
     );
@@ -459,11 +488,9 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
         return Column(
           children: <Widget>[
             Expanded(
-              child: widget.answers.isEmpty
+              child: _selectedEntry == null
                   ? _buildLogList()
-                  : (_mode == AnswerPanelMode.detail
-                        ? _buildDetailList()
-                        : _buildCompactList()),
+                  : _buildAnswerDetail(_selectedEntry!),
             ),
             _buildFooter(),
           ],
@@ -472,213 +499,116 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
     );
   }
 
-  // ---------------- 详情模式 ----------------
+  // ---------------- 单题详情卡 ----------------
 
-  Widget _buildDetailList() {
-    return ListView.separated(
-      key: const ValueKey<String>('answer-list'),
+  Widget _buildAnswerDetail(AnswerEntry entry) {
+    return Padding(
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-      itemCount: widget.answers.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 10),
-      itemBuilder: (context, index) => _buildAnswerCard(widget.answers[index]),
-    );
-  }
-
-  Widget _buildAnswerCard(AnswerEntry entry) {
-    return Container(
-      key: ValueKey<String>('answer-card-${entry.index}'),
-      padding: const EdgeInsets.fromLTRB(14, 12, 12, 4),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0x11000000)),
-        boxShadow: const <BoxShadow>[
-          BoxShadow(
-            color: Color(0x0F1B1B1F),
-            blurRadius: 12,
-            offset: Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              _buildIndexBadge(entry.index),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
-                  '第 ${entry.index} 题 · ${entry.typeLabel}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: _ink,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 9),
-          Text(
-            entry.answer,
-            style: const TextStyle(
-              fontSize: 14.5,
-              height: 1.5,
-              color: Color(0xDE1B1B1F),
-            ),
-          ),
-          if (entry.stem.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF6F7FB),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                entry.stem,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 11.5,
-                  height: 1.45,
-                  color: Color(0x8A000000),
-                ),
-              ),
+      child: Container(
+        key: const ValueKey<String>('answer-detail'),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: const Color(0x11000000)),
+          boxShadow: const <BoxShadow>[
+            BoxShadow(
+              color: Color(0x121B1B1F),
+              blurRadius: 14,
+              offset: Offset(0, 5),
             ),
           ],
-          Align(
-            alignment: Alignment.centerRight,
-            child: _buildCopyButton(entry.answer),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------- 列表模式（手风琴） ----------------
-
-  Widget _buildCompactList() {
-    return ListView.separated(
-      key: const ValueKey<String>('answer-list'),
-      padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-      itemCount: widget.answers.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 8),
-      itemBuilder: (context, index) => _buildCompactTile(widget.answers[index]),
-    );
-  }
-
-  Widget _buildCompactTile(AnswerEntry entry) {
-    final expanded = _expanded.contains(entry.index);
-
-    return Container(
-      key: ValueKey<String>('answer-row-${entry.index}'),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: expanded
-              ? _primary.withValues(alpha: 0.30)
-              : const Color(0x11000000),
         ),
-        boxShadow: const <BoxShadow>[
-          BoxShadow(
-            color: Color(0x0D1B1B1F),
-            blurRadius: 10,
-            offset: Offset(0, 3),
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () => setState(() {
-            if (expanded) {
-              _expanded.remove(entry.index);
-            } else {
-              _expanded.add(entry.index);
-            }
-          }),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-                child: Row(
-                  children: <Widget>[
-                    _buildIndexBadge(entry.index),
-                    const SizedBox(width: 9),
-                    Expanded(
-                      child: Text(
-                        '第 ${entry.index} 题 · ${entry.typeLabel}',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
-                          color: _ink,
-                        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 6, 8),
+              child: Row(
+                children: <Widget>[
+                  _buildIndexBadge(entry.index),
+                  const SizedBox(width: 9),
+                  Flexible(
+                    child: Text(
+                      '第 ${entry.index} 题',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: _ink,
                       ),
                     ),
-                    // 复制放标题行：答案再长也不用滚到底找按钮
-                    _buildCopyButton(entry.answer),
-                    AnimatedRotation(
-                      turns: expanded ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOut,
-                      child: const Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        size: 22,
-                        color: Color(0x89000000),
+                  ),
+                  const SizedBox(width: 8),
+                  _buildTypePill(entry.typeLabel),
+                  const Spacer(),
+                  _buildCopyButton(entry.answer),
+                ],
+              ),
+            ),
+            const Divider(height: 1, thickness: 1, color: Color(0x0F000000)),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    if (_shouldShowStem(entry)) ...<Widget>[
+                      Text(
+                        entry.stem,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          height: 1.5,
+                          color: Color(0x99000000),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                    Text(
+                      entry.answer,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        height: 1.55,
+                        color: Color(0xE61B1B1F),
                       ),
                     ),
                   ],
                 ),
               ),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeOut,
-                alignment: Alignment.topCenter,
-                child: expanded
-                    ? Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Container(
-                              height: 1,
-                              color: const Color(0x0F000000),
-                            ),
-                            const SizedBox(height: 10),
-                            Text(
-                              entry.answer,
-                              style: const TextStyle(
-                                fontSize: 14.5,
-                                height: 1.5,
-                                color: Color(0xDE1B1B1F),
-                              ),
-                            ),
-                            if (entry.stem.isNotEmpty) ...<Widget>[
-                              const SizedBox(height: 8),
-                              Text(
-                                entry.stem,
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 11.5,
-                                  height: 1.45,
-                                  color: Color(0x8A000000),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      )
-                    : const SizedBox(width: double.infinity, height: 0),
-              ),
-            ],
-          ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 题干要不要显示。
+  ///
+  /// AI 有时会把题干原样抄进答案开头（尤其是翻译/简答题），这时再单独显示
+  /// 一遍题干，卡片顶部就成了一模一样的两段字，看着像重复渲染。
+  bool _shouldShowStem(AnswerEntry entry) {
+    final stem = entry.stem.replaceAll(RegExp(r'\s+'), '');
+    if (stem.isEmpty) return false;
+    final answer = entry.answer.replaceAll(RegExp(r'\s+'), '');
+    final probe = stem.length > 24 ? stem.substring(0, 24) : stem;
+    return !answer.contains(probe);
+  }
+
+  Widget _buildTypePill(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: _accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: _accent,
         ),
       ),
     );
@@ -730,7 +660,7 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
         child: Padding(
           padding: EdgeInsets.symmetric(horizontal: 24),
           child: Text(
-            '点下面的按钮：读取页面题目 → 请求 AI → 在面板里对照答案手动作答。\n'
+            '点下面的按钮：读取页面题目 → 请求 AI → 用顶部题号逐个对照答案手动作答。\n'
             '本工具不会替你填写任何内容。',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12.5, height: 1.6, color: Color(0x8A000000)),
@@ -865,5 +795,15 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
           margin: EdgeInsets.fromLTRB(16, 8, 16, _currentHeight + 20),
         ),
       );
+  }
+}
+
+/// 题号栏与下方卡片之间的淡淡分隔（吸收渐变到纯色底的过渡）
+class _TopBarTail extends StatelessWidget {
+  const _TopBarTail();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(height: 1, color: const Color(0x0F000000));
   }
 }
