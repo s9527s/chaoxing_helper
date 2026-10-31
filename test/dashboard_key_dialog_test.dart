@@ -20,13 +20,14 @@ void main() {
 
     await AppConfig.init();
     await tester.pumpWidget(const MaterialApp(home: DashboardPage()));
-    await tester.pump();
+    await tester.pump(); // 首帧
+    await tester.pump(); // 等本地缓存异步读取落定
   }
 
   testWidgets('模型设置弹窗：动态列表、可编辑、保存后落库', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
     expect(find.text('模型设置'), findsOneWidget);
@@ -57,7 +58,7 @@ void main() {
     expect(tester.takeException(), isNull);
 
     // 重新打开：输入框应回显已保存的值
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
     final reopened = find.byType(TextField);
     expect(
@@ -72,7 +73,7 @@ void main() {
   testWidgets('添加新模型：列表多出一张空卡片，空卡片保存时被丢弃', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('添加新模型'));
@@ -91,7 +92,7 @@ void main() {
   testWidgets('上下移动：交换优先级顺序，边界按钮置灰，已输入文字不丢', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
     // 注意：要取 IconButton 本身才能读 onPressed，byIcon 拿到的是 Icon
@@ -128,7 +129,7 @@ void main() {
   testWidgets('下移按钮同样生效，可把首位模型降到末位', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
     // 第一张卡片下移
@@ -147,7 +148,7 @@ void main() {
   testWidgets('删除模型：红色删除按钮移除对应卡片', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
     expect(find.text('模型 2'), findsOneWidget);
 

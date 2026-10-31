@@ -1,3 +1,4 @@
+import 'package:ai_web_reader/data/services/scanner_service.dart';
 import 'package:ai_web_reader/ui/pages/dashboard_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,14 +49,23 @@ List<CourseGroup> _debugCourses() {
 }
 
 void main() {
-  Future<void> pumpDashboard(WidgetTester tester, {List<CourseGroup>? courses}) async {
+  Future<void> pumpDashboard(
+    WidgetTester tester, {
+    List<CourseGroup>? courses,
+    List<CourseRef>? shortcuts,
+  }) async {
     tester.view.physicalSize = const Size(1080, 2600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(
-      MaterialApp(home: DashboardPage(debugCourses: courses ?? _debugCourses())),
+      MaterialApp(
+        home: DashboardPage(
+          debugCourses: courses ?? _debugCourses(),
+          debugShortcuts: shortcuts,
+        ),
+      ),
     );
     await tester.pump();
   }
@@ -67,16 +77,17 @@ void main() {
     expect(find.text('数据结构'), findsOneWidget);
     expect(find.text('线性代数'), findsOneWidget); // 无作业课程也显示
     expect(find.text('2'), findsNWidgets(2)); // 两门课各 2 份
-    // 顶部按钮已从「刷新」改为「进页面提取作业」
-    expect(find.byIcon(Icons.playlist_add), findsOneWidget);
-    expect(find.byIcon(Icons.settings), findsOneWidget);
+    // 顶部：重新提取按钮 + 模型设置
+    expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
   });
 
   testWidgets('切换按作业视图：隐藏无作业课程，紧急的在前', (tester) async {
     await pumpDashboard(tester);
 
-    await tester.tap(find.text('按作业视图'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.text('作业'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('线性代数'), findsNothing);
 
@@ -90,7 +101,8 @@ void main() {
     await pumpDashboard(tester);
 
     await tester.tap(find.text('数据结构'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('按截止时间倒序排列'), findsOneWidget);
     expect(find.text('2 份待办'), findsOneWidget);
@@ -101,26 +113,77 @@ void main() {
         lessThan(tester.getTopLeft(find.text(earlier)).dy));
 
     await tester.tap(find.byIcon(Icons.close));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('按截止时间倒序排列'), findsNothing);
   });
 
   testWidgets('高风险任务带锁，点击弹出警告，取消后不跳转', (tester) async {
     await pumpDashboard(tester);
-    await tester.tap(find.text('按作业视图'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.text('作业'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byIcon(Icons.lock_rounded), findsWidgets);
 
     await tester.tap(find.text('期中考试（机考）'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('高风险任务'), findsOneWidget);
     expect(find.textContaining('禁止在内置 WebView 加载'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('高风险任务'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('课程入口视图：渲染快捷卡片，有待办的排在前面', (tester) async {
+    final shortcuts = <CourseRef>[
+      const CourseRef(
+        courseName: '线性代数',
+        courseId: '1',
+        classId: '11',
+        cpi: '111',
+      ),
+      const CourseRef(
+        courseName: '高等数学 A',
+        courseId: '2',
+        classId: '22',
+        cpi: '222',
+        enc: 'abc',
+        homeUrl: 'https://mooc1.chaoxing.com/mooc2/work/list?enc=abc',
+      ),
+    ];
+
+    await pumpDashboard(tester, shortcuts: shortcuts);
+    await tester.tap(find.text('入口'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('高等数学 A'), findsOneWidget);
+    expect(find.text('线性代数'), findsOneWidget);
+    // 两列网格：高等数学 A 有 2 份待办，排在第一行第一列
+    expect(
+      tester.getTopLeft(find.text('高等数学 A')).dx,
+      lessThan(tester.getTopLeft(find.text('线性代数')).dx),
+    );
+    // 有 enc 的直接说「直达作业列表」，没有的只能进课程主页
+    expect(find.text('直达作业列表'), findsOneWidget);
+    expect(find.text('打开课程主页'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('没有课程入口时显示引导，而不是空作业态', (tester) async {
+    await pumpDashboard(tester, shortcuts: const <CourseRef>[]);
+    await tester.tap(find.text('入口'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('还没有课程入口'), findsOneWidget);
+    expect(find.text('暂无待办数据'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

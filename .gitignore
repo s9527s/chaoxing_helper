@@ -50,6 +50,8 @@ app.*.map.json
 # 本地工具与临时测试资源（不入库）
 .workbuddy/
 mock_work/
+tool/node_modules/
+tool/package-lock.json
 
 # 打包签名文件，绝不能提交
 key.properties

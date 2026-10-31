@@ -52,8 +52,6 @@ void main() {
     expect(url, contains('classId=100007001'));
     // 课程链接里的 cpi 必须带上，否则接口会拒绝
     expect(url, contains('cpi=100009001'));
-    // 候选地址：课程主页 → mooc2 列表 → 老接口
-    expect(courses.first.workListCandidates, hasLength(3));
     expect(courses[1].courseName, '高等数学 A');
   });
 
@@ -180,5 +178,99 @@ void main() {
     expect(items.first.deadline, DateTime(2026, 11, 1, 23, 59));
     expect(items.first.isExpired, isFalse);
     expect(items.first.hoursLeft, greaterThan(0));
+  });
+
+  test('课程列表：课程卡片 a.color1 + span.course-name', () {
+    const html = '''
+    <ul class="file-list">
+      <li>
+        <a class="color1" href="https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=100008001&amp;clazzid=100007001&amp;cpi=100009001&amp;ismooc2=1&amp;v=2" target="_blank">
+          <span class="course-name overHidden2" title="英语四六级">英语四六级</span>
+          <i class="icon-news"></i>
+        </a>
+      </li>
+      <li>
+        <a class="color1" href="https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=1&amp;clazzid=2&amp;cpi=3" target="_blank">
+          <span class="course-name overHidden2" title="高等数学">高等数学</span>
+        </a>
+      </li>
+    </ul>
+    ''';
+
+    final courses = service.parseCourseListHtml(html);
+    expect(courses, hasLength(2));
+    expect(courses.first.courseName, '英语四六级');
+    expect(courses.first.courseId, '100008001');
+    expect(courses.first.classId, '100007001');
+    expect(courses.first.cpi, '100009001');
+    // 课程列表页链接里没有 enc，就先落到课程主页
+    expect(courses.first.enc, isEmpty);
+    expect(courses.first.entryUrl, contains('stucoursemiddle'));
+  });
+
+  test('课程列表：卡片不是 <a> 时，从 onclick 里的地址兜底', () {
+    const html = '''
+    <li onclick="location.href='/visit/stucoursemiddle?courseid=77&amp;clazzid=88&amp;cpi=99'">
+      <div class="course-name">大学英语</div>
+    </li>
+    ''';
+
+    final courses = service.parseCourseListHtml(html);
+    expect(courses, hasLength(1));
+    expect(courses.single.courseName, '大学英语');
+    expect(courses.single.courseId, '77');
+    expect(courses.single.classId, '88');
+    // 相对路径要补全成绝对地址
+    expect(courses.single.entryUrl, startsWith('https://mooc1.chaoxing.com/'));
+  });
+
+  test('课程列表：页面里没有课程时返回空，不会误吞侧边栏链接', () {
+    const html = '''
+    <div class="sidebar">
+      <a href="/visit/space">进入空间</a>
+      <a href="/visit/courselist">我的课程</a>
+    </div>
+    ''';
+
+    expect(service.parseCourseListHtml(html), isEmpty);
+  });
+
+  test('课程入口：带 enc 的作业列表地址优先级更高', () {
+    const fromList = CourseRef(
+      courseName: '数据结构',
+      courseId: '11',
+      classId: '22',
+      cpi: '33',
+    );
+    const fromWorkPage = CourseRef(
+      courseName: '',
+      courseId: '11',
+      classId: '22',
+      enc: 'xyz',
+      homeUrl: 'https://mooc1.chaoxing.com/mooc2/work/list?courseId=11&classId=22&enc=xyz',
+    );
+
+    final merged = fromList.mergeWith(fromWorkPage);
+    // 名字没丢、enc 补上了、地址换成能直达作业列表的那个
+    expect(merged.courseName, '数据结构');
+    expect(merged.enc, 'xyz');
+    expect(merged.entryUrl, contains('enc=xyz'));
+  });
+
+  test('课程入口：从页面地址反解课程（含 enc）', () {
+    final ref = CourseRef.fromUrl(
+      'https://mooc1.chaoxing.com/mooc2/work/list?courseId=5&classId=6&cpi=7&enc=8&mooc2=1',
+      courseName: '线性代数',
+    );
+
+    expect(ref, isNotNull);
+    expect(ref!.courseName, '线性代数');
+    expect(ref.courseId, '5');
+    expect(ref.classId, '6');
+    expect(ref.enc, '8');
+    expect(ref.entryUrl, contains('enc=8'));
+
+    // 不是课程页的地址直接返回 null
+    expect(CourseRef.fromUrl('https://mooc1.chaoxing.com/visit/interaction'), isNull);
   });
 }

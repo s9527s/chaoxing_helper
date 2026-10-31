@@ -1,9 +1,6 @@
-import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
-
 
 /// 任务类型：决定点击拦截策略（标准作业可辅助，考试/论文仅提醒）。
 enum HomeworkKind {
@@ -56,6 +53,36 @@ class HomeworkItem {
       status.contains('已交') ||
           status.contains('已完成') ||
           status.contains('已提交');
+
+  /// 序列化（供本地缓存使用）
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'courseName': courseName,
+        'title': title,
+        'kind': kind.name,
+        'url': url,
+        'status': status,
+        'deadline': deadline?.toIso8601String(),
+        'identity': identity,
+      };
+
+  factory HomeworkItem.fromJson(Map<String, dynamic> json) {
+    final rawKind = (json['kind'] ?? '').toString();
+    final rawDeadline = (json['deadline'] ?? '').toString();
+    final rawIdentity = (json['identity'] ?? '').toString();
+
+    return HomeworkItem(
+      courseName: (json['courseName'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      kind: HomeworkKind.values.firstWhere(
+        (k) => k.name == rawKind,
+        orElse: () => HomeworkKind.homework,
+      ),
+      url: (json['url'] ?? '').toString(),
+      status: (json['status'] ?? '未知').toString(),
+      deadline: rawDeadline.isEmpty ? null : DateTime.tryParse(rawDeadline),
+      identity: rawIdentity.isEmpty ? null : rawIdentity,
+    );
+  }
 
   /// 距离截止的小时数，负数表示已截止；无截止时间时为 null
   int? get hoursLeft {
@@ -111,54 +138,132 @@ class CourseRef {
     return buffer.toString();
   }
 
-  /// 依次尝试的地址：课程主页 → mooc2 作业列表 → 老接口
-  List<String> get workListCandidates {
-    final list = <String>[];
-    if (homeUrl.isNotEmpty) list.add(homeUrl);
-    list.add(workListUrl);
-    final legacy = StringBuffer('https://mooc1.chaoxing.com/work/getAllWork')
-      ..write('?classId=$classId')
-      ..write('&courseId=$courseId')
-      ..write('&isdisplaytable=2&mooc=1');
-    if (enc.isNotEmpty) legacy.write('&enc=$enc');
-    list.add(legacy.toString());
-    return list;
+  /// 去重主键：同一个 courseId + classId 视为同一门课
+  String get key => '$courseId|$classId';
+
+  /// 课程卡片链接缺失时（例如从地址栏直接解析 URL），至少还有 id 可用
+  bool get hasIds => courseId.isNotEmpty && classId.isNotEmpty;
+
+  /// 快捷入口真正要打开的地址。
+  ///
+  /// 优先用 homeUrl：它要么来自课程列表页里站点自己生成的卡片链接，
+  /// 要么来自用户上次实际停留过的页面（那时 URL 上带着 enc/stuenc，
+  /// 直接跳过去就是作业列表，省掉「点进课程→点作业」两步）。
+  String get entryUrl => homeUrl.isNotEmpty ? homeUrl : workListUrl;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'courseName': courseName,
+        'courseId': courseId,
+        'classId': classId,
+        'cpi': cpi,
+        'enc': enc,
+        'homeUrl': homeUrl,
+      };
+
+  factory CourseRef.fromJson(Map<String, dynamic> json) => CourseRef(
+        courseName: (json['courseName'] ?? '').toString(),
+        courseId: (json['courseId'] ?? '').toString(),
+        classId: (json['classId'] ?? '').toString(),
+        cpi: (json['cpi'] ?? '').toString(),
+        enc: (json['enc'] ?? '').toString(),
+        homeUrl: (json['homeUrl'] ?? '').toString(),
+      );
+
+  /// 从一个学习通页面地址里反解出课程引用。
+  ///
+  /// 用于「用户手动进到某门课的作业列表页再点提取」时把这门课记下来：
+  /// 页面 URL 上带什么参数就存什么（含 enc / stuenc），下次直接跳过去。
+  /// 拿不到 courseId + classId 时返回 null。
+  static CourseRef? fromUrl(
+    String url, {
+    String courseName = '',
+  }) {
+    if (url.trim().isEmpty) return null;
+
+    final uri = Uri.tryParse(_decodeEntities(url.trim()));
+    if (uri == null) return null;
+
+    String? courseId;
+    String? classId;
+    var cpi = '';
+    var enc = '';
+
+    uri.queryParameters.forEach((key, value) {
+      if (value.isEmpty) return;
+      switch (key.toLowerCase()) {
+        case 'courseid':
+          courseId = value;
+        case 'clazzid':
+        case 'classid':
+          classId = value;
+        case 'cpi':
+          cpi = value;
+        case 'enc':
+        case 'stuenc':
+          enc = value;
+      }
+    });
+
+    if (courseId == null || classId == null) return null;
+
+    return CourseRef(
+      courseName: courseName,
+      courseId: courseId!,
+      classId: classId!,
+      cpi: cpi,
+      enc: enc,
+      homeUrl: url.trim(),
+    );
   }
+
+  static String _decodeEntities(String raw) =>
+      raw.replaceAll('&amp;', '&').replaceAll('&#38;', '&');
+
+  /// 合并两门课的信息，谁有谁的。
+  ///
+  /// 场景：课程列表页批量导入时拿到了课程名和 cpi（但没有 enc），
+  /// 后来用户手动进了这门课的作业列表页，又拿到了带 enc 的 URL。
+  /// 两次合并后，快捷入口就能直接跳到作业列表。
+  CourseRef mergeWith(CourseRef other) {
+    // 保留信息量更大的那个地址：带 enc 的优先（它能直接打开作业列表）
+    final mineHome = homeUrl;
+    final otherHome = other.homeUrl;
+    final preferredHome = _score(otherHome) > _score(mineHome) ? otherHome : mineHome;
+
+    return CourseRef(
+      courseName: other.courseName.isNotEmpty ? other.courseName : courseName,
+      courseId: other.courseId.isNotEmpty ? other.courseId : courseId,
+      classId: other.classId.isNotEmpty ? other.classId : classId,
+      cpi: cpi.isNotEmpty ? cpi : other.cpi,
+      enc: enc.isNotEmpty ? enc : other.enc,
+      homeUrl: preferredHome,
+    );
+  }
+
+  /// 地址可用性打分：带 enc 的作业列表页 > 普通课程主页 > 空
+  static int _score(String url) {
+    if (url.isEmpty) return 0;
+    final lower = url.toLowerCase();
+    if (lower.contains('enc=') || lower.contains('stuenc=')) return 3;
+    if (lower.contains('/work/') || lower.contains('workid=')) return 2;
+    return 1;
+  }
+
 }
 
-/// 扫描过程中的可预期错误（登录失效、网络异常），文案可直接展示给用户。
-class ScannerException implements Exception {
-  const ScannerException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => message;
-}
-
-/// 全量任务扫描服务。
+/// 页面 HTML 解析服务。
 ///
-/// 采集走 [CourseHtmlFetcher]（真实浏览器内核，带 Cookie），
-/// 因为学习通的列表是 JS 动态渲染的，Dio 直连拿到的是空壳 HTML。
+/// 只做**纯解析**：输入是已经拿到手的 HTML 字符串，输出是任务/课程列表。
+/// 本身不发起任何网络请求、不创建 WebView、不加载页面。
+/// HTML 的来源要么是每个 frame 自报上来的快照，要么是用户当前正在看的页面。
 class ScannerService {
   ScannerService._();
 
   static final ScannerService instance = ScannerService._();
 
-  /// 我的课程列表
+  /// 我的课程列表（仅作为快捷入口的默认入口地址）
   static const String courseListUrl =
       'https://mooc1.chaoxing.com/visit/interaction';
-
-  /// 课程列表页的等待选择器（出现即说明渲染完成）
-  static const String _courseListSelector =
-      '.course, .course-item, a[href*="courseid"]';
-
-  /// 作业列表页的等待选择器。
-  /// 末尾两个是学习通真实作业列表的结构（<li onclick="goTask(this)" data="...">），
-  /// 不加它们的话列表页永远等不到匹配节点，每门课都要干等满 timeout 才提取。
-  static const String _workListSelector =
-      '.TiMu, .bottomList li, .work-item, .ulDiv li, li[onclick*="goTask"], '
-      'li[data*="workId"], a[href*="workId"]';
 
   /// 状态节点：`<p class="status fl">未交</p>`
   static const String _statusSelector = '.status.fl';
@@ -191,151 +296,12 @@ class ScannerService {
     r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?',
   );
 
-  final CourseHtmlFetcher _fetcher = CourseHtmlFetcher();
-  final Random _random = Random();
-
-  /// 扫描全部待办任务。
-  ///
-  /// [onProgress] 会在每次发起课程请求前回调 `(已发起数, 总数, 课程名)`，
-  /// 便于界面展示「正在扫描：高等数学…（2/5）」。
-  ///
-  /// 并发 loadUrl 会让多个导航互相打断，结果是拿到别人的页面或空壳。
-  Future<List<HomeworkItem>> fetchAllTasks({
-    void Function(int current, int total, String courseName)? onProgress,
-  }) async {
-    await _fetcher.init();
-
-    try {
-      final courses = await _fetchCourses();
-      if (courses.isEmpty) {
-        onProgress?.call(1, 1, '未发现课程');
-        return const <HomeworkItem>[];
-      }
-
-      final total = courses.length;
-      final collected = <HomeworkItem>[];
-
-      for (var i = 0; i < total; i++) {
-        onProgress?.call(i + 1, total, courses[i].courseName);
-        collected.addAll(await _fetchCourseTasks(courses[i]));
-        if (i + 1 < total) await _antiBotDelay();
-      }
-
-      _sortByDeadline(collected);
-      onProgress?.call(total, total, '扫描完成');
-      return collected;
-    } finally {
-      await _fetcher.dispose();
-    }
-  }
-
-  /// 无截止时间的任务排到最后
-  void _sortByDeadline(List<HomeworkItem> items) {
-    items.sort((a, b) {
-      final da = a.deadline;
-      final db = b.deadline;
-      if (da == null && db == null) return 0;
-      if (da == null) return 1;
-      if (db == null) return -1;
-      return da.compareTo(db);
-    });
-  }
-
-  // ---------------- 页面渲染抓取 ----------------
-
-  /// 拉取课程列表（等 JS 渲染出课程卡片再取 outerHTML）
-  Future<List<CourseRef>> _fetchCourses() async {
-    final html = await _fetcher.fetchRenderedHtml(
-      url: courseListUrl,
-      waitForSelector: _courseListSelector,
-      referer: 'https://mooc1.chaoxing.com/',
-    );
-
-    if (html.isEmpty) {
-      throw const ScannerException('课程列表页渲染为空，请检查网络或登录态');
-    }
-    if (_looksLikeLoginPage(html)) {
-      throw const ScannerException('登录状态已失效，请重新登录后再扫描');
-    }
-
-    final courses = _parseCourseList(html);
-    debugPrint('[Scanner] 课程列表 ${html.length} 字 → 解析到 ${courses.length} 门课程');
-    if (courses.isEmpty) {
-      debugPrint('[Scanner] 课程列表片段: ${_preview(html)}');
-    }
-    return courses;
-  }
-
-  /// 拉取单个课程的作业/考试列表
-  Future<List<HomeworkItem>> _fetchCourseTasks(CourseRef course) async {
-    // 请求前随机延迟，规避高频检测
-    await _antiBotDelay();
-
-    final candidates = course.workListCandidates;
-
-    for (var i = 0; i < candidates.length; i++) {
-      final url = candidates[i];
-      final html = await _fetcher.fetchRenderedHtml(
-        url: url,
-        waitForSelector: _workListSelector,
-        timeout: const Duration(seconds: 10),
-        // 用课程列表页做 Referer，避免被判成跨站跳转
-        referer: courseListUrl,
-      );
-
-      if (html.isEmpty) continue;
-      if (_looksLikeLoginPage(html)) {
-        // 单门课被踢回登录页不该中断整轮扫描，换下一个地址试试
-        debugPrint('[Scanner] ${course.courseName} 地址${i + 1} 被重定向到登录页，换下一个');
-        continue;
-      }
-      if (_looksLikeNoAccess(html)) {
-        debugPrint('[Scanner] ${course.courseName} 第 ${i + 1} 个地址无访问权限，换下一个: $url');
-        continue;
-      }
-
-      final items = _parseCourseTasks(course, html);
-      debugPrint('[Scanner] ${course.courseName} 地址${i + 1} ${html.length} 字 → ${items.length} 条任务');
-      if (items.isNotEmpty) return items;
-
-      debugPrint('[Scanner] 地址${i + 1} 片段: ${_preview(html)}');
-      if (i == candidates.length - 1) {
-        debugPrint('[Scanner] ${course.courseName} 全部地址均未解析到任务');
-      }
-    }
-
-    return const <HomeworkItem>[];
-  }
-
-  /// 学习通的「温馨提示 · 您长时间没有操作，或没有此页面访问权限」
-  bool _looksLikeNoAccess(String html) {
-    return html.contains('没有此页面访问权限') ||
-        html.contains('温馨提示') && html.contains('长时间没有操作');
-  }
-
-  /// 调试用：截取 HTML 片段（去掉换行，避免 logcat 被截断）
-  String _preview(String html) {
-    final flat = html.replaceAll(RegExp(r'\s+'), ' ');
-    return flat.length > 600 ? flat.substring(0, 600) : flat;
-  }
-
-  bool _looksLikeLoginPage(String html) {
-    final lower = html.toLowerCase();
-    return lower.contains('passport2.chaoxing.com/login') ||
-        lower.contains('userlogin') ||
-        (lower.contains('用户登录') && lower.contains('passport'));
-  }
-
-  /// 300~800ms 随机延迟
-  Future<void> _antiBotDelay() {
-    final milliseconds = 300 + _random.nextInt(501);
-    return Future<void>.delayed(Duration(milliseconds: milliseconds));
-  }
-
   // ---------------- HTML 解析 ----------------
 
-  /// 供单元测试直接喂 HTML 片段，避免依赖网络。
-  @visibleForTesting
+  /// 从一个页面里解析出课程列表（只读 DOM，不点击、不跳转）。
+  ///
+  /// 「课程入口」批量导入用的就是它：打开学习通课程列表页，
+  /// 点一下「保存全部课程」，一次性把整页的课程卡片存成快捷入口。
   List<CourseRef> parseCourseListHtml(String html) => _parseCourseList(html);
 
   /// 解析「我的课程」列表页。
@@ -362,6 +328,14 @@ class ScannerService {
     if (anchors.isEmpty) {
       anchors = document.querySelectorAll('a[href*="courseid="]');
     }
+    if (anchors.isEmpty) {
+      // 新版课程列表没有 a.color1：从课程名节点往上找到最近的课程链接
+      anchors = _findAnchorsByCourseName(document);
+    }
+    if (anchors.isEmpty) {
+      // 卡片压根不是 <a>，而是 <li onclick="...stucoursemiddle?courseid=...">
+      anchors = _findAnchorsFromOnclick(document);
+    }
 
     for (final anchor in anchors) {
       final href = _normalizeUrl(anchor.attributes['href'] ?? '');
@@ -387,6 +361,52 @@ class ScannerService {
     }
 
     return courses;
+  }
+
+  /// 兜底：从 `.course-name` 之类的课程名节点往上冒泡，找到包着它的课程链接。
+  /// 新版课程列表的 DOM 层级更深，直接选 a 会漏掉。
+  List<dom.Element> _findAnchorsByCourseName(dom.Document document) {
+    final found = <dom.Element>[];
+    final seen = <dom.Element>{};
+
+    for (final node in document.querySelectorAll('[class*="course-name"]')) {
+      var current = node.parent;
+      while (current != null) {
+        if (current.localName == 'a') {
+          final href = current.attributes['href'] ?? '';
+          if (href.toLowerCase().contains('courseid=') && seen.add(current)) {
+            found.add(current);
+          }
+          break;
+        }
+        current = current.parent;
+      }
+    }
+    return found;
+  }
+
+  /// 兜底：卡片本身不是链接，而是 `<li onclick="location='...courseid=...'">`。
+  /// 这里把 onclick 里的地址抽出来，拼成一个合成的 <a>，复用后面的解析逻辑。
+  List<dom.Element> _findAnchorsFromOnclick(dom.Document document) {
+    final found = <dom.Element>[];
+    final seen = <String>{};
+
+    for (final el in document.querySelectorAll('[onclick]')) {
+      final onclick = el.attributes['onclick'] ?? '';
+      if (!onclick.toLowerCase().contains('courseid=')) continue;
+
+      final match = RegExp(
+        r'''['"]([^'"]*courseid=[^'"]*)['"]''',
+      ).firstMatch(onclick);
+      final href = (match?.group(1) ?? '').trim();
+      if (href.isEmpty || !seen.add(href)) continue;
+
+      final anchor = dom.Element.tag('a');
+      anchor.attributes['href'] = href;
+      anchor.append(el.clone(true));
+      found.add(anchor);
+    }
+    return found;
   }
 
   /// 课程名：`span.course-name` 文本 → 其 title 属性 → a 的 title → a 的纯文本

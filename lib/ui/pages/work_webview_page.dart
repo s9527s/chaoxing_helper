@@ -7,8 +7,9 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/config/app_config.dart';
 import '../../data/services/ai_solver_service.dart';
+import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
-import '../widgets/solving_bottom_sheet.dart';
+import '../widgets/answer_float_panel.dart';
 
 class WorkWebViewPage extends StatefulWidget {
   final String workTitle;
@@ -58,6 +59,30 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   final SolvingProgressController _progressController = SolvingProgressController();
   final AiSolverService _aiSolverService = AiSolverService();
   bool _isDomReady = false;
+
+  /// 当前展示的参考答案（为空表示还没生成）
+  List<AnswerEntry> _answers = const <AnswerEntry>[];
+
+  /// 只读的页面状态指纹：表单控件数量 + 它们当前值的总长度 + HTML 总长度。
+  ///
+  /// **全程只读**（`input.value` 也只读取不赋值），
+  /// 用来在运行前后各采一次，向用户证明本 App 没有改动网页。
+  /// 只扫顶层文档，不穿透 iframe——与提取脚本保持同一原则。
+  static const String _fingerprintBody = r'''
+    var fields = document.querySelectorAll('input, textarea, select');
+    var valueLen = 0;
+    for (var i = 0; i < fields.length; i++) {
+      var v = fields[i].value || '';
+      valueLen += v.length;
+    }
+    return JSON.stringify({
+      fields: fields.length,
+      valueLen: valueLen,
+      htmlLen: document.documentElement
+        ? document.documentElement.outerHTML.length
+        : 0
+    });
+  ''';
 
   /// 处理中标志位，防止重复点击「开始答题」并发跑多条流水线
   bool _isProcessing = false;
@@ -178,8 +203,12 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
     final int total = (payload['totalCount'] as num?)?.toInt() ?? 0;
     final int solvable = (payload['solvableCount'] as num?)?.toInt() ?? 0;
+    final int collapsed = (payload['collapsedCount'] as num?)?.toInt() ?? 0;
     _cachedQuestions = List<Map<String, dynamic>>.from(payload['questions'] as List? ?? []);
 
+    if (collapsed > 0) {
+      _log('去重：折叠了 $collapsed 个子块，同一大题的多个空只算一题');
+    }
     _progressController.updateQuestionStats(total, solvable);
     if (_extractCompleter != null && !_extractCompleter!.isCompleted) {
       _extractCompleter!.complete(payload);
@@ -251,6 +280,11 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
     _isProcessing = true;
     _progressController.reset();
+    // 新一轮开始：先清掉上一轮的答案，避免旧答案混进来
+    if (mounted) setState(() => _answers = const <AnswerEntry>[]);
+
+    // 流水线开始前先采一次页面指纹
+    final fingerprintBefore = await _readFingerprint();
 
     try {
       _progressController.setStage(
@@ -303,11 +337,43 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         logMessage: '已生成 ${answers.length} 条参考答案，请对照页面自行填写',
       );
 
-      await _showAnswerSheet(answers, solvableQuestions);
+      final fingerprintAfter = await _readFingerprint();
+      _reportFingerprint(fingerprintBefore, fingerprintAfter);
+
+      _publishAnswers(answers, solvableQuestions);
     } catch (e) {
+      // 失败时也做一次比对，保证每次运行都有可核对的记录
+      final fingerprintAfter = await _readFingerprint();
+      _reportFingerprint(fingerprintBefore, fingerprintAfter);
       _fail(e.toString());
     } finally {
       _isProcessing = false;
+    }
+  }
+
+  /// 只读采集页面指纹（连 input.value 都只读取，绝不赋值）
+  Future<String> _readFingerprint() async {
+    final controller = _webViewController;
+    if (controller == null) return '';
+    try {
+      final result = await controller.callAsyncJavaScript(
+        functionBody: _fingerprintBody,
+      );
+      return (result?.value ?? '').toString();
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /// 比对运行前后的页面指纹，把结论打到日志面板上
+  void _reportFingerprint(String before, String after) {
+    if (before.isEmpty || after.isEmpty) return;
+
+    if (before == after) {
+      _log('🔒 页面指纹一致 $before —— 网页未被修改');
+    } else {
+      _log('⚠️ 页面指纹变化：$before → $after');
+      _log('   本 App 全程只读不写，变化来自网页自身的刷新/懒加载');
     }
   }
 
@@ -335,141 +401,47 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     return (raw ?? '').toString();
   }
 
-  /// 底部弹窗展示「第 N 题：答案」。纯展示，不操作网页。
-  Future<void> _showAnswerSheet(
+  /// 把 AI 的答案整理成面板条目，就地展示（不再弹模态框）。
+  /// 纯展示：不写页面、不点按钮。
+  void _publishAnswers(
     List<Map<String, dynamic>> answers,
     List<Map<String, dynamic>> questions,
-  ) async {
+  ) {
     final questionByIndex = <int, Map<String, dynamic>>{};
     for (final q in questions) {
       final index = (q['index'] as num?)?.toInt();
       if (index != null) questionByIndex[index] = q;
     }
 
-    final sorted = List<Map<String, dynamic>>.from(answers)
+    final ordered = List<Map<String, dynamic>>.from(answers)
       ..sort((a, b) {
         final ai = (a['index'] as num?)?.toInt() ?? 0;
         final bi = (b['index'] as num?)?.toInt() ?? 0;
         return ai.compareTo(bi);
       });
 
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetContext) {
-        final maxHeight = MediaQuery.of(sheetContext).size.height * 0.72;
-        return ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxHeight),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 8),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    margin: const EdgeInsets.only(bottom: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                Text(
-                  'AI 参考答案（共 ${sorted.length} 条）',
-                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '本工具不会自动作答或操作网页，请对照下面的答案自行在页面中作答。',
-                  style: TextStyle(fontSize: 12, height: 1.5, color: Colors.grey.shade600),
-                ),
-                const SizedBox(height: 12),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    itemCount: sorted.length,
-                    separatorBuilder: (context, index) => const Divider(height: 18),
-                    itemBuilder: (context, idx) {
-                      final answer = sorted[idx];
-                      final index = (answer['index'] as num?)?.toInt() ?? idx + 1;
-                      final question = questionByIndex[index];
-                      final stem = (question?['stem'] ?? '').toString();
-                      final type = _answerTypeLabel(
-                        answer['type'] ?? question?['type'],
-                      );
-
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Container(
-                            width: 26,
-                            height: 26,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.06),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Text(
-                              '$index',
-                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                Text(
-                                  '第 $index 题 · $type：${_formatAnswer(answer['answer'])}',
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    height: 1.4,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                if (stem.isNotEmpty) ...<Widget>[
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    stem,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 11.5,
-                                      height: 1.4,
-                                      color: Colors.grey.shade500,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  height: 44,
-                  child: FilledButton(
-                    onPressed: () => Navigator.of(sheetContext).pop(),
-                    child: const Text('我知道了，去手动填写'),
-                  ),
-                ),
-              ],
-            ),
+    // 兜底去重：index + 答案完全相同的记录只保留一条，
+    // 避免 AI 对同一道大题吐出多条一模一样的答案
+    final seen = <String>{};
+    final entries = <AnswerEntry>[];
+    for (final answer in ordered) {
+      final index = (answer['index'] as num?)?.toInt() ?? 0;
+      final text = _formatAnswer(answer['answer']);
+      if (!seen.add('$index|$text')) continue;
+      entries.add(
+        AnswerEntry(
+          index: index,
+          typeLabel: _answerTypeLabel(
+            answer['type'] ?? questionByIndex[index]?['type'],
           ),
-        );
-      },
-    );
+          answer: text,
+          stem: (questionByIndex[index]?['stem'] ?? '').toString(),
+        ),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _answers = entries);
   }
 
   /// 刷新缓存的「能否后退」状态
@@ -542,6 +514,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         return;
       }
 
+      // 顺手把这门课记进快捷入口：下次直接跳回这个页面
+      final currentUrl = (await controller.getUrl())?.toString() ?? '';
+      await _rememberCourseFromUrl(currentUrl);
+
       if (!mounted) return;
       // 把结果回传给看板（通过路由返回值接收）
       Navigator.of(context).pop(items);
@@ -590,7 +566,144 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 2)));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 3),
+          // 悬浮式：避免被底部的进度面板盖住
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 190),
+        ),
+      );
+  }
+
+  /// 课程名黑名单：这些是页面标题/通用文案，不是课程名
+  static const Set<String> _genericNames = <String>{
+    '作业', '任务', '考试', '学习通', '超星学习通', '我的课程', '课程',
+    '章节', '资料', '讨论', '任务列表', '作业列表', '考试列表', '收件箱',
+    '首页', '互动', '待办',
+  };
+
+  /// 去掉页面标题里的噪音，留下像课程名的那部分
+  String _cleanCourseName(String raw) {
+    var value = raw.trim();
+    if (value.isEmpty) return '';
+    value = value.split(RegExp(r'\s+|、|\||-')).first.trim();
+    if (value.isEmpty || _genericNames.contains(value)) return '';
+    return value;
+  }
+
+  /// 把当前页面地址记成这门课的入口。
+  ///
+  /// 在学习通里，课程页/作业列表页的 URL 上带着 courseId、classId，
+  /// 很多时候还带 enc。存下来后，主页的快捷卡片就能直接跳回这个页面。
+  Future<void> _rememberCourseFromUrl(String rawUrl) async {
+    final ref = CourseRef.fromUrl(rawUrl);
+    if (ref == null) return;
+
+    final name = _cleanCourseName(_guessCourseName());
+    try {
+      await CourseStore.upsertMany(<CourseRef>[
+        CourseRef(
+          courseName: name,
+          courseId: ref.courseId,
+          classId: ref.classId,
+          cpi: ref.cpi,
+          enc: ref.enc,
+          homeUrl: ref.homeUrl,
+        ),
+      ]);
+    } catch (e) {
+      debugPrint('[WorkWebView] 记录课程失败: $e');
+    }
+  }
+
+  /// 「保存全部课程」：只读当前页 DOM，把整页课程卡片存成快捷入口。
+  ///
+  /// 全程不点击、不跳转、不修改 DOM——只是把页面上已经渲染好的
+  /// `<a class="color1">` 课程链接读出来。
+  Future<void> _importCoursesFromCurrentPage() async {
+    final controller = _webViewController;
+    if (controller == null) {
+      _showSnack('页面还没准备好，请稍候再试');
+      return;
+    }
+
+    try {
+      _log('正在读取本页课程…');
+
+      final collected = <CourseRef>[];
+      final seen = <String>{};
+
+      // ---------- 1) 先用各 frame 已经上报的 HTML ----------
+      for (final html in _frameHtmls.values) {
+        _collectCoursesFromHtml(html, collected, seen);
+      }
+
+      // ---------- 2) 再抓一次当前文档，防 AJAX 刚渲染完还没上报 ----------
+      if (collected.isEmpty) {
+        final dump = await controller.callAsyncJavaScript(
+          functionBody: r"""
+            return document.documentElement ? document.documentElement.outerHTML : '';
+          """,
+        );
+        final html = (dump?.value ?? '').toString();
+        if (html.isNotEmpty) {
+          _collectCoursesFromHtml(html, collected, seen);
+        }
+      }
+
+      // ---------- 3) 兜底：直接解析当前地址（单门课） ----------
+      if (collected.isEmpty) {
+        final url = (await controller.getUrl())?.toString() ?? '';
+        final ref = CourseRef.fromUrl(url);
+        if (ref != null && seen.add(ref.key)) {
+          collected.add(
+            CourseRef(
+              courseName: _cleanCourseName(_guessCourseName()),
+              courseId: ref.courseId,
+              classId: ref.classId,
+              cpi: ref.cpi,
+              enc: ref.enc,
+              homeUrl: ref.homeUrl,
+            ),
+          );
+        }
+      }
+
+      if (collected.isEmpty) {
+        _showSnack(
+          '本页没解析到课程：请先在网页里打开「课程列表」页面，'
+          '等课程卡片显示出来再点这里',
+        );
+        return;
+      }
+
+      final added = await CourseStore.upsertMany(collected);
+      _log('✅ 课程入口：共 ${collected.length} 门，新增 $added 门');
+      _showSnack(
+        added > 0
+            ? '已保存 ${collected.length} 门课程（新增 $added 门）'
+            : '这 ${collected.length} 门课程已经在列表里了',
+      );
+    } catch (e) {
+      _log('❌ 课程导入失败: $e');
+      _showSnack('课程导入失败：$e');
+    }
+  }
+
+  /// 从一段 HTML 里解析课程卡片并去重收集
+  void _collectCoursesFromHtml(
+    String html,
+    List<CourseRef> collected,
+    Set<String> seen,
+  ) {
+    if (html.isEmpty) return;
+    for (final course
+        in ScannerService.instance.parseCourseListHtml(html)) {
+      if (!seen.add(course.key)) continue;
+      collected.add(course);
+    }
   }
 
   /// 统一的返回逻辑：网页能后退就后退，退无可退才关闭本页
@@ -644,15 +757,22 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         ),
         actions: <Widget>[
           IconButton(
+            icon: const Icon(Icons.menu_book_outlined),
+            tooltip: '保存全部课程（只读当前页）',
+            onPressed: _importCoursesFromCurrentPage,
+          ),
+          IconButton(
             icon: const Icon(Icons.playlist_add_check),
             tooltip: '提取本页作业',
             onPressed: _extractTasksFromCurrentPage,
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
+      // WebView 与悬浮面板平铺叠放：面板只是浮在上面的一层，
+      // 不像模态弹窗那样接管整屏，网页本身随时可以点、可以输入。
+      body: Stack(
+        children: <Widget>[
+          Positioned.fill(
             child: InAppWebView(
                     initialUrlRequest: URLRequest(url: WebUri(widget.workUrl)),
                     // 唯一的注入脚本：只读上报 frame HTML（用于导入作业列表）
@@ -687,19 +807,14 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                     },
                   ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10)]),
-            child: SafeArea(
-              top: false,
-              child: SolvingBottomSheet(
-                controller: _progressController,
-                // 默认只自动作答单选/多选/判断/填空
-                onStartPressed: _isDomReady
-                    ? () => _startAiReading(
-                          enabledTypes: const ['single', 'multiple', 'judge', 'fill'],
-                        )
-                    : () {},
+          // 可拖拽 / 可最小化 / 支持一键复制的悬浮面板
+          Positioned.fill(
+            child: AnswerFloatPanel(
+              controller: _progressController,
+              answers: _answers,
+              enabled: _isDomReady,
+              onStartPressed: () => _startAiReading(
+                enabledTypes: const ['single', 'multiple', 'judge', 'fill'],
               ),
             ),
           ),

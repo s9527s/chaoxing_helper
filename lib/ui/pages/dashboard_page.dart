@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/config/app_config.dart';
 import '../../core/network/cookie_sync_helper.dart';
+import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
+import '../../data/services/task_store.dart';
 import 'login_page.dart';
 import 'work_webview_page.dart';
 
@@ -89,19 +93,35 @@ class CourseGroup {
   }
 }
 
-/// 视图模式
-enum DashboardView { byCourse, byTask }
+/// 视图模式：按课程 / 按作业 / 课程入口（快捷跳转）
+enum DashboardView { byCourse, byTask, byShortcut }
+
+/// 排序方式
+enum SortMode {
+  deadline('截止时间（紧急优先）'),
+  course('课程名称');
+
+  const SortMode(this.label);
+
+  final String label;
+}
+
+/// 紧急程度：决定卡片左侧色条与倒计时胶囊配色
+enum _Urgency { urgent, soon, normal, expired }
 
 // ============================================================
 // 页面
 // ============================================================
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key, this.debugCourses});
+  const DashboardPage({super.key, this.debugCourses, this.debugShortcuts});
 
   /// 仅用于测试/本地预览：传入后直接渲染这批数据，跳过「空状态」。
   /// 生产环境保持 null，数据来自「手动进页面提取」。
   final List<CourseGroup>? debugCourses;
+
+  /// 仅用于测试：直接注入课程快捷入口，跳过本地缓存读取。
+  final List<CourseRef>? debugShortcuts;
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
@@ -112,13 +132,28 @@ class _DashboardPageState extends State<DashboardPage> {
   static const Color _urgentColor = Color(0xFFE53935);
   static const Color _safeColor = Color(0xFF2E7D32);
   static const Color _expiredColor = Color(0xFF9E9E9E);
+  static const Color _soonColor = Color(0xFFEF6C00);
   static const Color _riskColor = Color(0xFFB26A00);
   static const Color _riskBg = Color(0xFFFFF4E0);
   static const Color _safeBg = Color(0xFFE8F5E9);
   static const Color _pageBg = Color(0xFFF6F7F9);
 
   DashboardView _view = DashboardView.byCourse;
+  SortMode _sortMode = SortMode.deadline;
+
+  /// 缓存里的原始数据（唯一数据源，_courses 由它派生）
+  List<HomeworkItem> _items = <HomeworkItem>[];
   List<CourseGroup> _courses = <CourseGroup>[];
+
+  /// 课程快捷入口（课程名 + 课程地址），主页第三视图渲染它
+  List<CourseRef> _shortcuts = <CourseRef>[];
+
+  /// 每秒刷新的“当前时间”，驱动倒计时重建
+  DateTime _now = DateTime.now();
+  Timer? _ticker;
+
+  /// 首帧读缓存期间显示 loading，避免闪一下空态
+  bool _loadingCache = true;
 
   /// 课程色板，按出现顺序循环取色
   static const List<Color> _coursePalette = <Color>[
@@ -134,12 +169,65 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   void initState() {
     super.initState();
-    // 刻意不再自动扫描：
-    // 自动扫描只会白跑半分钟然后返回 0 条。数据来源统一改为「手动进页面提取」。
+
+    // 1) 每秒刷新倒计时；没数据时不做无谓重建
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _courses.isEmpty) return;
+      setState(() => _now = DateTime.now());
+    });
+
+    // 2) 恢复上次的视图选择
+    TaskStore.loadView().then((value) {
+      if (!mounted || value == null) return;
+      final restored = DashboardView.values.firstWhere(
+        (v) => v.name == value,
+        orElse: () => DashboardView.byCourse,
+      );
+      if (restored != _view) setState(() => _view = restored);
+    });
+
+    // 3) 数据来源：调试注入 or 本地缓存（不做任何自动抓取）
     final injected = widget.debugCourses;
     if (injected != null) {
       _courses = injected;
+      _loadingCache = false;
+      _loadShortcuts();
+      return;
     }
+    _loadCached();
+  }
+
+  /// 课程快捷入口单独加载：它和作业数据在业务上互不影响
+  Future<void> _loadShortcuts() async {
+    final injected = widget.debugShortcuts;
+    if (injected != null) {
+      if (!mounted) return;
+      setState(() => _shortcuts = injected);
+      return;
+    }
+
+    final courses = await CourseStore.load();
+    if (!mounted) return;
+    setState(() => _shortcuts = courses);
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  /// 启动时从本地恢复上次提取的作业
+  Future<void> _loadCached() async {
+    final items = await TaskStore.load();
+    if (!mounted) return;
+    setState(() {
+      _items = items;
+      _courses = _groupByCourse(items);
+      _now = DateTime.now();
+      _loadingCache = false;
+    });
+    await _loadShortcuts();
   }
 
   // ---------------- 数据 ----------------
@@ -208,7 +296,42 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
       ),
     );
+    // 在里面可能点了「保存全部课程」，回来刷新快捷入口
+    await _loadShortcuts();
     _handleImported(imported);
+  }
+
+  /// 直接跳进某门课（快捷卡片）：地址里带着课程 id、cpi，
+  /// 若这门课之前进过作业列表，还会带上 enc，能一步到位。
+  Future<void> _openCourseEntry(CourseRef course) async {
+    final imported = await Navigator.of(context).push<List<HomeworkItem>>(
+      MaterialPageRoute<List<HomeworkItem>>(
+        builder: (_) => WorkWebViewPage(
+          workTitle: course.courseName,
+          workUrl: course.entryUrl,
+        ),
+      ),
+    );
+    await _loadShortcuts();
+    _handleImported(imported);
+  }
+
+  /// 打开课程列表页，让用户点右上角「保存全部课程」批量建快捷入口
+  Future<void> _openCourseImport() async {
+    await Navigator.of(context).push<List<HomeworkItem>>(
+      MaterialPageRoute<List<HomeworkItem>>(
+        builder: (_) => const WorkWebViewPage(
+          workTitle: '课程列表（点右上角保存全部）',
+          workUrl: 'https://mooc1.chaoxing.com/visit/interaction',
+        ),
+      ),
+    );
+    await _loadShortcuts();
+    if (!mounted) return;
+    if (_shortcuts.isNotEmpty) {
+      setState(() => _view = DashboardView.byShortcut);
+      TaskStore.saveView(DashboardView.byShortcut.name);
+    }
   }
 
   /// 从标题 + 解析类型推断任务类型（决定是否上锁）
@@ -228,17 +351,79 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   /// 按作业视图用的扁平列表：紧急的在前
+  /// HomeworkItem → CourseTask
+  CourseTask _toTask(HomeworkItem item) => CourseTask(
+        title: item.title,
+        courseName: item.courseName,
+        type: _inferType(item),
+        deadline: item.deadline ?? DateTime.now().add(const Duration(days: 30)),
+        url: item.url,
+        deadlineUnknown: item.deadline == null,
+        identity: item.identity,
+      );
+
+  /// 按课程分组（保持首次出现顺序）
+  List<CourseGroup> _groupByCourse(List<HomeworkItem> items) {
+    final grouped = <String, List<HomeworkItem>>{};
+    for (final item in items) {
+      grouped.putIfAbsent(item.courseName, () => <HomeworkItem>[]).add(item);
+    }
+
+    var index = 0;
+    final courses = <CourseGroup>[];
+    grouped.forEach((name, groupItems) {
+      final tasks = groupItems.map(_toTask).toList()
+        ..sort((a, b) => a.deadline.compareTo(b.deadline));
+      courses.add(
+        CourseGroup(
+          name: name,
+          teacher: '共 ${tasks.length} 份任务',
+          tasks: tasks,
+          accent: _coursePalette[index % _coursePalette.length],
+        ),
+      );
+      index++;
+    });
+    return courses;
+  }
+
+  /// 作业视图：按当前排序方式排列
   List<CourseTask> get _sortedTasks {
     final all = _courses.expand((c) => c.tasks).toList();
-    all.sort((a, b) => a.deadline.compareTo(b.deadline));
+    all.sort((a, b) {
+      if (_sortMode == SortMode.course) {
+        final byCourse = a.courseName.compareTo(b.courseName);
+        if (byCourse != 0) return byCourse;
+      }
+      return a.deadline.compareTo(b.deadline);
+    });
     return all;
+  }
+
+  /// 课程视图：按当前排序方式排列
+  List<CourseGroup> get _sortedCourses {
+    final list = List<CourseGroup>.of(_courses);
+    if (_sortMode == SortMode.course) {
+      list.sort((a, b) => a.name.compareTo(b.name));
+      return list;
+    }
+    list.sort((a, b) {
+      final da = a.nearest?.deadline;
+      final db = b.nearest?.deadline;
+      if (da == null && db == null) return 0;
+      if (da == null) return 1;
+      if (db == null) return -1;
+      return da.compareTo(db);
+    });
+    return list;
   }
 
   int get _pendingCount => _courses.expand((c) => c.tasks).where((t) => !t.isExpired).length;
 
-  int get _highRiskCount => _courses.expand((c) => c.tasks).where((t) => t.highRisk).length;
+  int get _urgentCount =>
+      _courses.expand((c) => c.tasks).where((t) => _urgency(t, _now) == _Urgency.urgent).length;
 
-  String get _summaryText => '共 ${_courses.length} 门课 · $_pendingCount 份待办';
+  int get _highRiskCount => _courses.expand((c) => c.tasks).where((t) => t.highRisk).length;
 
   String get _keyStatusText {
     final models = AppConfig.getLlmModels();
@@ -250,18 +435,43 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // ---------------- 状态颜色 / 文案 ----------------
 
-  Color _statusColor(CourseTask task) {
-    if (task.isExpired) return _expiredColor;
-    if (task.isUrgent) return _urgentColor;
-    return _safeColor;
+  /// 紧急程度（以当前时间计算，随 ticker 每秒变化）
+  _Urgency _urgency(CourseTask task, DateTime now) {
+    if (task.deadlineUnknown) return _Urgency.normal;
+    final diff = task.deadline.difference(now);
+    if (diff.isNegative) return _Urgency.expired;
+    if (diff.inHours < 24) return _Urgency.urgent;
+    if (diff.inHours < 72) return _Urgency.soon;
+    return _Urgency.normal;
   }
 
-  String _countdownLabel(CourseTask task) {
+  Color _urgencyColor(CourseTask task, DateTime now) {
+    switch (_urgency(task, now)) {
+      case _Urgency.expired:
+        return _expiredColor;
+      case _Urgency.urgent:
+        return _urgentColor;
+      case _Urgency.soon:
+        return _soonColor;
+      case _Urgency.normal:
+        return _safeColor;
+    }
+  }
+
+  /// ⏳ 剩 2天14小时 / 🔥 剩 3小时12分 / 已过期
+  String _countdownText(CourseTask task, DateTime now) {
     if (task.deadlineUnknown) return '待定';
-    if (task.isExpired) return '已截止';
-    if (task.hoursLeft < 24) return '🔥 剩 ${task.hoursLeft}小时';
-    final days = (task.hoursLeft / 24).ceil();
-    return '剩 $days天';
+    final diff = task.deadline.difference(now);
+    if (diff.isNegative) return '已过期';
+
+    if (diff.inHours < 24) {
+      final hours = diff.inHours;
+      final minutes = diff.inMinutes % 60;
+      return hours > 0 ? '🔥 剩 $hours小时$minutes分' : '🔥 剩 $minutes 分';
+    }
+    final days = diff.inDays;
+    final hours = diff.inHours % 24;
+    return '⏳ 剩 $days天$hours小时';
   }
 
   // ---------------- 点击拦截 ----------------
@@ -291,55 +501,93 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   /// 接收 WorkWebViewPage 回传的作业并合并进看板
-  void _handleImported(List<HomeworkItem>? items) {
+  /// 导入手动提取到的作业：按 workId 去重 → 合并进缓存 → 落盘
+  Future<void> _handleImported(List<HomeworkItem>? items) async {
     if (items == null || items.isEmpty) return;
 
-    final byName = <String, CourseGroup>{for (final c in _courses) c.name: c};
+    final existing = <String>{for (final item in _items) _identityOf(item)};
+    final merged = List<HomeworkItem>.of(_items);
     var added = 0;
 
     for (final item in items) {
-      final task = CourseTask(
-        title: item.title,
-        courseName: item.courseName,
-        type: _inferType(item),
-        deadline: item.deadline ?? DateTime.now().add(const Duration(days: 30)),
-        url: item.url,
-        deadlineUnknown: item.deadline == null,
-        identity: item.identity,
-      );
-
-      final group = byName[item.courseName];
-      if (group == null) {
-        final created = CourseGroup(
-          name: item.courseName,
-          teacher: '共 1 份任务',
-          tasks: <CourseTask>[task],
-          accent: _coursePalette[_courses.length % _coursePalette.length],
-        );
-        byName[item.courseName] = created;
-        _courses.add(created);
-        added++;
-        continue;
-      }
-
-      // 同一 workId 视为同一份作业：多次提取（URL 签名可能变化）也不会重复堆积
-      final duplicated = group.tasks.any((t) {
-        if (t.identity != null && task.identity != null) {
-          return t.identity == task.identity;
-        }
-        return t.url == task.url && t.title == task.title;
-      });
-      if (duplicated) continue;
-      group.tasks.add(task);
+      if (!existing.add(_identityOf(item))) continue;
+      merged.add(item);
       added++;
     }
 
     if (!mounted) return;
-    setState(() {});
-    _toast(added > 0 ? '已导入 $added 条作业' : '这些作业已经在看板里了');
+    setState(() {
+      _items = merged;
+      _courses = _groupByCourse(merged);
+      _now = DateTime.now();
+    });
+
+    await TaskStore.save(merged);
+    if (!mounted) return;
+    _toast(added > 0 ? '已导入 $added 条作业，并保存到本地' : '这些作业已经在看板里了');
   }
 
-  /// 高风险任务：只允许系统外部浏览器，绝不进内置 WebView
+  /// 去重用的稳定标识：workId 优先，没有就退回 url+title
+  String _identityOf(HomeworkItem item) {
+    final id = item.identity;
+    if (id != null && id.isNotEmpty) return id;
+    return '${item.url}|${item.title}';
+  }
+
+  /// 清空本地缓存（二次确认，避免误触）
+  Future<void> _confirmClear() async {
+    if (_courses.isEmpty) {
+      _toast('当前没有可清空的数据');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清空本地数据'),
+        content: const Text('将删除本地缓存的全部作业记录（不影响学习通上的实际作业）。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () {
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop(false);
+            },
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            onPressed: () {
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop(true);
+            },
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    await TaskStore.clear();
+    if (!mounted) return;
+    setState(() {
+      _items = <HomeworkItem>[];
+      _courses = <CourseGroup>[];
+    });
+    _toast('本地数据已清空');
+  }
+
+  void _changeView(DashboardView view) {
+    if (view == _view) return;
+    setState(() => _view = view);
+    TaskStore.saveView(view.name);
+  }
+
+  void _changeSort(SortMode mode) {
+    if (mode == _sortMode) return;
+    setState(() => _sortMode = mode);
+  }
+
+  /// 高风险任务：只允许系统外部浏览器，绝不进内置 WebView  /// 高风险任务：只允许系统外部浏览器，绝不进内置 WebView
   Future<void> _confirmHighRisk(CourseTask task) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -459,7 +707,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   padding: const EdgeInsets.only(top: 4),
                   itemCount: sorted.length,
                   separatorBuilder: (context, index) => const SizedBox(height: 10),
-                  itemBuilder: (_, index) => _buildTaskTile(sorted[index]),
+                  itemBuilder: (_, index) => _buildTaskTile(sorted[index], DateTime.now()),
                 ),
               ),
             ],
@@ -762,153 +1010,486 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // ---------------- UI ----------------
 
+  // ---------------- UI ----------------
+
   @override
   Widget build(BuildContext context) {
+    if (_loadingCache) {
+      return const Scaffold(
+        backgroundColor: _pageBg,
+        body: Center(child: CircularProgressIndicator(strokeWidth: 2.4)),
+      );
+    }
+
+    final now = _now;
+
     return Scaffold(
       backgroundColor: _pageBg,
       body: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _buildHeader(),
-            _buildViewSwitcher(),
-            const SizedBox(height: 6),
+            _buildGradientHeader(),
+            _buildToolbar(),
             Expanded(
-              child: _view == DashboardView.byCourse ? _buildCourseView() : _buildTaskView(),
+              // 双视图切换动画：淡入 + 轻微上滑
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) {
+                  final offset = Tween<Offset>(
+                    begin: const Offset(0, 0.03),
+                    end: Offset.zero,
+                  ).animate(animation);
+                  return FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(position: offset, child: child),
+                  );
+                },
+                child: KeyedSubtree(
+                  key: ValueKey<DashboardView>(_view),
+                  child: switch (_view) {
+                    DashboardView.byCourse => _buildCourseView(now),
+                    DashboardView.byTask => _buildTaskView(now),
+                    DashboardView.byShortcut => _buildShortcutView(),
+                  },
+                ),
+              ),
             ),
             _buildFooter(),
           ],
         ),
       ),
-      // 保留：手动进入学习通任意页（调试 / 兜底入口）
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openManualEntry,
-        label: const Text('手动进入作业页'),
-        icon: const Icon(Icons.web),
-      ),
+      // 悬浮按钮随视图切换：课程入口页给「导入课程」，其余给「读取作业」
+      floatingActionButton: _view == DashboardView.byShortcut
+          ? FloatingActionButton.extended(
+              onPressed: _openCourseImport,
+              label: const Text('导入课程'),
+              icon: const Icon(Icons.menu_book_outlined),
+            )
+          : FloatingActionButton.extended(
+              onPressed: _openManualEntry,
+              label: const Text('读取作业'),
+              icon: const Icon(Icons.download_rounded),
+            ),
     );
   }
 
-  Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 8, 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  /// 顶部渐变统计面板
+  Widget _buildGradientHeader() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+      padding: const EdgeInsets.fromLTRB(18, 8, 6, 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: <Color>[Color(0xFF3D5AFE), Color(0xFF7C4DFF)],
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: const Color(0xFF3D5AFE).withValues(alpha: 0.28),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
         children: <Widget>[
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    const Text(
-                      '作业',
-                      style: TextStyle(
-                        fontSize: 30,
-                        fontWeight: FontWeight.w700,
-                        height: 1.15,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '$_summaryText · $_highRiskCount 项高风险',
+          Row(
+            children: <Widget>[
+              const Expanded(
+                child: Text(
+                  '作业看板',
                   style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.black.withValues(alpha: 0.55),
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                    color: Colors.white,
                   ),
                 ),
-              ],
+              ),
+              PopupMenuButton<SortMode>(
+                tooltip: '排序方式',
+                initialValue: _sortMode,
+                onSelected: _changeSort,
+                icon: const Icon(Icons.swap_vert_rounded, color: Colors.white, size: 22),
+                itemBuilder: (context) => SortMode.values
+                    .map(
+                      (mode) => PopupMenuItem<SortMode>(
+                        value: mode,
+                        child: Row(
+                          children: <Widget>[
+                            Icon(
+                              mode == _sortMode ? Icons.check_circle : Icons.circle_outlined,
+                              size: 16,
+                              color: mode == _sortMode
+                                  ? const Color(0xFF3D5AFE)
+                                  : Colors.black26,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(mode.label),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+              IconButton(
+                tooltip: '模型设置',
+                onPressed: _showKeyDialog,
+                icon: const Icon(Icons.settings_outlined, color: Colors.white, size: 22),
+              ),
+              if (kDebugMode)
+                IconButton(
+                  tooltip: '打开测试页（debug）',
+                  onPressed: _openDebugUrlDialog,
+                  icon: const Icon(Icons.bug_report_outlined, color: Colors.white, size: 20),
+                ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '总待办：$_pendingCount 项 · 紧急：$_urgentCount 项',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+              height: 1.3,
             ),
           ),
-          if (kDebugMode)
-            IconButton(
-              onPressed: _openDebugUrlDialog,
-              tooltip: '打开测试页（debug）',
-              iconSize: 22,
-              icon: Icon(Icons.bug_report_outlined, color: Colors.black.withValues(alpha: 0.55)),
+          const SizedBox(height: 6),
+          Text(
+            '${_courses.length} 门课程 · $_highRiskCount 项高风险 · ${_sortMode.label}',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 11.5,
+              color: Colors.white.withValues(alpha: 0.80),
             ),
-          IconButton(
-            onPressed: _openManualEntry,
-            tooltip: '进页面提取作业',
-            iconSize: 23,
-            icon: Icon(Icons.playlist_add, color: Colors.black.withValues(alpha: 0.65)),
-          ),
-          IconButton(
-            onPressed: _showKeyDialog,
-            tooltip: '设置',
-            iconSize: 24,
-            icon: Icon(Icons.settings, color: Colors.black.withValues(alpha: 0.65)),
           ),
         ],
       ),
     );
   }
 
-  /// 顶部视图切换：按课程 / 按作业
-  Widget _buildViewSwitcher() {
+  /// 视图切换 + 操作入口
+  Widget _buildToolbar() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Container(
-        height: 42,
-        padding: const EdgeInsets.all(3),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.055),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: <Widget>[
-            _buildSegment(DashboardView.byCourse, '按课程视图', Icons.school_outlined),
-            _buildSegment(DashboardView.byTask, '按作业视图', Icons.list_alt_outlined),
-          ],
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 4),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SegmentedButton<DashboardView>(
+              segments: const <ButtonSegment<DashboardView>>[
+                ButtonSegment<DashboardView>(
+                  value: DashboardView.byCourse,
+                  label: Text('课程'),
+                ),
+                ButtonSegment<DashboardView>(
+                  value: DashboardView.byTask,
+                  label: Text('作业'),
+                ),
+                ButtonSegment<DashboardView>(
+                  value: DashboardView.byShortcut,
+                  label: Text('入口'),
+                ),
+              ],
+              selected: <DashboardView>{_view},
+              showSelectedIcon: false,
+              onSelectionChanged: (selection) => _changeView(selection.first),
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            ),
+          ),
+          IconButton(
+            tooltip: '重新提取（覆盖旧数据）',
+            onPressed: _openManualEntry,
+            icon: const Icon(Icons.refresh_rounded, size: 22),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            icon: const Icon(Icons.more_vert, size: 20),
+            onSelected: (value) {
+              if (value == 'clear') _confirmClear();
+              if (value == 'import') _openCourseImport();
+            },
+            itemBuilder: (context) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                value: 'import',
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.menu_book_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('导入课程入口'),
+                  ],
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'clear',
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.delete_sweep_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('清空本地数据'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------- 视图 A：按课程 ----------------
+
+  Widget _buildCourseView(DateTime now) {
+    final courses = _sortedCourses;
+    if (courses.isEmpty) return _buildEmptyState();
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
+      itemCount: courses.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 10),
+      itemBuilder: (context, index) => _buildCourseCard(courses[index], now),
+    );
+  }
+
+  Widget _buildCourseCard(CourseGroup course, DateTime now) {
+    final nearest = course.nearest;
+    final accent = course.accent;
+
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      color: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => _showCourseTasks(course),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 14, 12, 14),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(Icons.menu_book_outlined, size: 22, color: accent),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      course.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w600,
+                        height: 1.3,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      nearest == null ? '暂无待办' : '最近：${_countdownText(nearest, now)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Colors.black.withValues(alpha: 0.45),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (course.taskCount > 0)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE53935),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${course.taskCount}',
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 2),
+              Icon(Icons.chevron_right, size: 20, color: Colors.black.withValues(alpha: 0.22)),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildSegment(DashboardView view, String label, IconData icon) {
-    final selected = _view == view;
-    return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () {
-          if (_view == view) return;
-          setState(() => _view = view);
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          curve: Curves.easeOut,
-          decoration: BoxDecoration(
-            color: selected ? Colors.white : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
-            boxShadow: selected
-                ? <BoxShadow>[
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.06),
-                      blurRadius: 6,
-                      offset: const Offset(0, 2),
-                    ),
-                  ]
-                : null,
+  // ---------------- 视图 B：按作业 ----------------
+
+  Widget _buildTaskView(DateTime now) {
+    final tasks = _sortedTasks;
+    if (tasks.isEmpty) return _buildEmptyState();
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
+      itemCount: tasks.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 10),
+      itemBuilder: (context, index) => _buildTaskTile(tasks[index], now),
+    );
+  }
+
+  // ---------------- 视图 C：课程快捷入口 ----------------
+
+  /// 课程名 → 该课程待办数量（用于卡片右上角红点）
+  Map<String, int> get _taskCountByCourse {
+    final map = <String, int>{};
+    for (final course in _courses) {
+      map[course.name] = course.taskCount;
+    }
+    return map;
+  }
+
+  Widget _buildShortcutView() {
+    if (_shortcuts.isEmpty) return _buildShortcutEmptyState();
+
+    final counts = _taskCountByCourse;
+    final sorted = List<CourseRef>.of(_shortcuts)
+      ..sort((a, b) {
+        // 有待办的排前面，其次按课程名
+        final pa = counts[a.courseName] ?? 0;
+        final pb = counts[b.courseName] ?? 0;
+        if (pa != pb) return pb.compareTo(pa);
+        return a.courseName.compareTo(b.courseName);
+      });
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(
+            '共 ${_shortcuts.length} 门课程 · 点卡片直接进课程页面',
+            style: TextStyle(
+              fontSize: 11.5,
+              color: Colors.black.withValues(alpha: 0.40),
+            ),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+        ),
+        for (var i = 0; i < sorted.length; i += 2) ...<Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Icon(
-                icon,
-                size: 16,
-                color: selected ? Colors.black.withValues(alpha: 0.8) : Colors.black.withValues(alpha: 0.45),
+              Expanded(
+                child: _buildShortcutCard(sorted[i], i, counts),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 10),
+              if (i + 1 < sorted.length)
+                Expanded(child: _buildShortcutCard(sorted[i + 1], i + 1, counts))
+              else
+                const Expanded(child: SizedBox()),
+            ],
+          ),
+          const SizedBox(height: 10),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildShortcutCard(
+    CourseRef course,
+    int index,
+    Map<String, int> counts,
+  ) {
+    final accent = _coursePalette[index % _coursePalette.length];
+    final pending = counts[course.courseName] ?? 0;
+    final hasEnc = course.enc.isNotEmpty;
+
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      color: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => _openCourseEntry(course),
+        onLongPress: () => _confirmRemoveShortcut(course),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Container(
+                    width: 34,
+                    height: 34,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: Icon(Icons.menu_book_outlined, size: 18, color: accent),
+                  ),
+                  const Spacer(),
+                  if (pending > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE53935),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        '$pending',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
               Text(
-                label,
+                course.courseName,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  height: 1.3,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                hasEnc ? '直达作业列表' : '打开课程主页',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  color: selected ? Colors.black.withValues(alpha: 0.85) : Colors.black.withValues(alpha: 0.45),
+                  fontSize: 11,
+                  color: hasEnc
+                      ? const Color(0xFF2E7D32)
+                      : Colors.black.withValues(alpha: 0.40),
                 ),
               ),
             ],
@@ -918,150 +1499,105 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  // ---------------- 视图 A：按课程 ----------------
-
-  Widget _buildCourseView() {
-    if (_courses.isEmpty) return _buildEmptyState();
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
-      itemCount: _courses.length,
-      itemBuilder: (context, index) => _buildCourseCard(_courses[index]),
+  /// 长按卡片 → 删除这门课的快捷入口
+  Future<void> _confirmRemoveShortcut(CourseRef course) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('移除课程入口'),
+        content: Text('将移除「${course.courseName}」的快捷入口，不影响学习通上的课程本身。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () {
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop(false);
+            },
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            onPressed: () {
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop(true);
+            },
+            child: const Text('移除'),
+          ),
+        ],
+      ),
     );
+
+    if (confirmed != true) return;
+    await CourseStore.remove(course.key);
+    await _loadShortcuts();
+    if (!mounted) return;
+    _toast('已移除「${course.courseName}」');
   }
 
-  Widget _buildCourseCard(CourseGroup course) {
-    final nearest = course.nearest;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: <Widget>[
-          Material(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            clipBehavior: Clip.antiAlias,
-            child: InkWell(
-              onTap: () => _showCourseTasks(course),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-                child: Row(
-                  children: <Widget>[
-                    // 课程色块
-                    Container(
-                      width: 42,
-                      height: 42,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: course.accent.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(Icons.menu_book_outlined, size: 22, color: course.accent),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(
-                            course.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.black.withValues(alpha: course.hasTasks ? 0.88 : 0.45),
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            course.hasTasks
-                                ? '${course.teacher} · ${course.taskCount} 份待办'
-                                : '${course.teacher} · 暂无待办',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.black.withValues(alpha: 0.45),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (nearest != null) ...<Widget>[
-                      const SizedBox(width: 8),
-                      Text(
-                        _countdownLabel(nearest),
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: _statusColor(nearest),
-                        ),
-                      ),
-                    ],
-                    Icon(
-                      Icons.chevron_right,
-                      size: 20,
-                      color: Colors.black.withValues(alpha: course.hasTasks ? 0.30 : 0.12),
-                    ),
-                  ],
+  Widget _buildShortcutEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              Icons.dashboard_customize_outlined,
+              size: 56,
+              color: Colors.black.withValues(alpha: 0.15),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              '还没有课程入口',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: Colors.black.withValues(alpha: 0.55),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '点下面的按钮打开学习通课程列表，\n'
+              '等课程卡片显示出来后，点右上角「保存全部课程」，\n'
+              '就能一次性把整页课程存成快捷卡片。',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.6,
+                color: Colors.black.withValues(alpha: 0.38),
+              ),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: _openCourseImport,
+              icon: const Icon(Icons.menu_book_outlined, size: 18),
+              label: const Text('导入课程'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
                 ),
               ),
             ),
-          ),
-          // 右上角红点（带数字）
-          if (course.hasTasks)
-            Positioned(
-              right: 10,
-              top: -6,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                constraints: const BoxConstraints(minWidth: 20),
-                decoration: BoxDecoration(
-                  color: _urgentColor,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.white, width: 1.5),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  '${course.taskCount}',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    height: 1.1,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  // ---------------- 视图 B：按作业 ----------------
+  /// 任务卡片（主列表与课程弹窗共用）
+  Widget _buildTaskTile(CourseTask task, DateTime now) {
+    final barColor = _urgencyColor(task, now);
+    final dimmed = _urgency(task, now) == _Urgency.expired;
 
-  Widget _buildTaskView() {
-    final tasks = _sortedTasks;
-    if (tasks.isEmpty) return _buildEmptyState();
-
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
-      itemCount: tasks.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 10),
-      itemBuilder: (context, index) => _buildTaskTile(tasks[index]),
-    );
-  }
-
-  /// 任务卡片（主列表与底部弹窗共用）
-  Widget _buildTaskTile(CourseTask task) {
-    final barColor = _statusColor(task);
-    final dimmed = task.isExpired;
-
-    return Material(
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
       color: Colors.white,
-      borderRadius: BorderRadius.circular(14),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
+      ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _onTaskTap(task),
@@ -1069,20 +1605,19 @@ class _DashboardPageState extends State<DashboardPage> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              // 左侧状态竖条
-              Container(width: 4, color: barColor),
+              // 左侧紧急程度色条
+              Container(width: 5, color: barColor),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 14, 12),
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
-                          // 高风险锁
                           if (task.highRisk) ...<Widget>[
-                            Icon(Icons.lock_rounded, size: 15, color: _riskColor),
+                            const Icon(Icons.lock_rounded, size: 15, color: _riskColor),
                             const SizedBox(width: 5),
                           ],
                           Expanded(
@@ -1095,13 +1630,13 @@ class _DashboardPageState extends State<DashboardPage> {
                                 fontWeight: FontWeight.w600,
                                 height: 1.3,
                                 color: dimmed
-                                    ? Colors.black.withValues(alpha: 0.40)
+                                    ? Colors.black.withValues(alpha: 0.38)
                                     : Colors.black.withValues(alpha: 0.88),
                               ),
                             ),
                           ),
                           const SizedBox(width: 8),
-                          _buildCountdownPill(task),
+                          _buildCountdownChip(task, now),
                         ],
                       ),
                       const SizedBox(height: 8),
@@ -1133,23 +1668,41 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildCountdownPill(CourseTask task) {
-    final color = _statusColor(task);
+  /// 倒计时胶囊：<24h 红底白字，<72h 橙色，其余绿色，过期灰色
+  Widget _buildCountdownChip(CourseTask task, DateTime now) {
+    final urgency = _urgency(task, now);
+    final Color bg;
+    final Color fg;
+
+    switch (urgency) {
+      case _Urgency.urgent:
+        bg = _urgentColor;
+        fg = Colors.white;
+      case _Urgency.soon:
+        bg = _soonColor.withValues(alpha: 0.12);
+        fg = _soonColor;
+      case _Urgency.expired:
+        bg = const Color(0xFFF0F1F3);
+        fg = _expiredColor;
+      case _Urgency.normal:
+        bg = _safeColor.withValues(alpha: 0.12);
+        fg = _safeColor;
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.10),
+        color: bg,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
       child: Text(
-        _countdownLabel(task),
-        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: color),
+        _countdownText(task, now),
+        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: fg),
       ),
     );
   }
 
-  /// 类型标签：普通作业绿色【可辅助】，高风险琥珀【🔒 仅提醒】
+  /// 类型标签：普通作业绿色，高风险琥珀色带锁
   Widget _buildTypeTag(TaskType type) {
     final isSafe = !type.highRisk;
     final fg = isSafe ? _safeColor : _riskColor;
@@ -1167,7 +1720,12 @@ class _DashboardPageState extends State<DashboardPage> {
           ],
           Text(
             type.label,
-            style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: fg, height: 1.2),
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: fg,
+              height: 1.2,
+            ),
           ),
         ],
       ),
@@ -1179,16 +1737,16 @@ class _DashboardPageState extends State<DashboardPage> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 28),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             Icon(
               Icons.inbox_outlined,
-              size: 54,
-              color: Colors.black.withValues(alpha: 0.18),
+              size: 56,
+              color: Colors.black.withValues(alpha: 0.15),
             ),
             const SizedBox(height: 14),
             Text(
-              '还没有作业数据',
+              '暂无待办数据',
               style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
@@ -1197,8 +1755,9 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
             const SizedBox(height: 8),
             Text(
-              '点下方按钮进入学习通，手动点到「课程 → 作业」，\n'
-              '再点右上角的提取按钮，作业就会出现在这里。',
+              '点「读取作业」进入学习通，手动点到「课程 → 作业」页面，\n'
+              '再点右上角的提取按钮；提取结果会自动保存在本地。\n'
+              '想少找几次课？先到「入口」页把课程存成快捷卡片。',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 12.5,
@@ -1209,13 +1768,13 @@ class _DashboardPageState extends State<DashboardPage> {
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: _openManualEntry,
-              icon: const Icon(Icons.web, size: 18),
-              label: const Text('去提取作业'),
+              icon: const Icon(Icons.download_rounded, size: 18),
+              label: const Text('读取作业'),
               style: FilledButton.styleFrom(
-                backgroundColor: Colors.black.withValues(alpha: 0.82),
-                foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
+                ),
               ),
             ),
           ],
@@ -1226,8 +1785,8 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Widget _buildFooter() {
     return Padding(
-      // 右侧留 96 给右下角悬浮按钮，避免按钮被盖住
-      padding: const EdgeInsets.fromLTRB(16, 0, 96, 8),
+      // 右侧留 140 给「读取作业」悬浮按钮，避免按钮被盖住
+      padding: const EdgeInsets.fromLTRB(16, 0, 140, 8),
       child: Row(
         children: <Widget>[
           Expanded(
