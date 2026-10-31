@@ -215,4 +215,28 @@ void main() {
     expect(find.text('总待办：4 项 · 紧急：4 项'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('过期但仍未交的作业照样计入总待办（和网页的「未交」数对齐）', (tester) async {
+    final courses = <CourseGroup>[
+      CourseGroup(
+        name: '英语四六级',
+        teacher: '共 2 份任务',
+        accent: const Color(0xFF3F6BE0),
+        tasks: <CourseTask>[
+          _task('英语四六级', '作业1', TaskType.homework, const Duration(hours: 20)),
+          _task(
+            '英语四六级',
+            '作业2（已截止但仍未交）',
+            TaskType.homework,
+            const Duration(hours: -30),
+          ),
+        ],
+      ),
+    ];
+
+    await pumpDashboard(tester, courses: courses);
+
+    expect(find.text('总待办：2 项 · 紧急：1 项'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

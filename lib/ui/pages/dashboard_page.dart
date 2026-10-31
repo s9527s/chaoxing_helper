@@ -372,12 +372,12 @@ class _DashboardPageState extends State<DashboardPage> {
     return list;
   }
 
-  /// 待办数量：**只数未交/待交且还没过期**的任务
-  /// （已交 / 待批阅的已经在校验层被丢掉，这里再兜一层，防止脏数据混入计数）
-  int get _pendingCount => _courses
-      .expand((c) => c.tasks)
-      .where((t) => t.isPending && !t.isExpired)
-      .length;
+  /// 待办数量：**只按状态数**——网页上显示几条「未交/待交」，这里就是几条。
+  ///
+  /// 不再排除已过期的：过期的作业在网页上仍然是「未交」，两边数量要能对上；
+  /// 过期与否只影响颜色和倒计时，不影响「它还没交」这个事实。
+  int get _pendingCount =>
+      _courses.expand((c) => c.tasks).where((t) => t.isPending).length;
 
   /// 紧急数量：同样只数未交的（已交的再急也不用做了）
   int get _urgentCount => _courses
