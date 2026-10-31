@@ -19,7 +19,7 @@ CourseTask _task(
   );
 }
 
-List<CourseGroup> _debugCourses() {
+List<CourseGroup> _previewCourses() {
   return <CourseGroup>[
     CourseGroup(
       name: '高等数学 A',
@@ -62,8 +62,8 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: DashboardPage(
-          debugCourses: courses ?? _debugCourses(),
-          debugShortcuts: shortcuts,
+          previewCourses: courses ?? _previewCourses(),
+          previewShortcuts: shortcuts,
         ),
       ),
     );

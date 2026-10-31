@@ -45,7 +45,7 @@ void main() {
       ),
     ];
 
-    await tester.pumpWidget(MaterialApp(home: DashboardPage(debugCourses: courses)));
+    await tester.pumpWidget(MaterialApp(home: DashboardPage(previewCourses: courses)));
     await tester.pump();
     await tester.pump();
 

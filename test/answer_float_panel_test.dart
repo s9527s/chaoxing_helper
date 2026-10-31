@@ -121,7 +121,7 @@ void main() {
     expect(find.text('第 1 题 · 单选'), findsOneWidget);
     expect(find.text('第 2 题 · 填空'), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.content_copy_outlined).first);
+    await tester.tap(find.text('复制').first);
     await tester.pump();
 
     expect(_clipboard, 'B');
@@ -207,6 +207,98 @@ void main() {
 
     // 出现在两处：日志列表一条 + 底部单行摘要一条
     expect(find.textContaining('页面指纹一致'), findsNWidgets(2));
-    expect(find.byIcon(Icons.content_copy_outlined), findsNothing);
+    expect(find.text('复制'), findsNothing);
+  });
+
+  testWidgets('双模式：默认详情铺开，切列表后只列题号，答案收起', (tester) async {
+    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
+
+    // 默认详情模式：答案直接铺开
+    expect(find.byKey(const ValueKey<String>('mode-detail')), findsOneWidget);
+    expect(find.text('B'), findsOneWidget);
+    expect(find.text('北京、上海'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 列表模式：题号在，答案收起
+    expect(find.text('第 1 题 · 单选'), findsOneWidget);
+    expect(find.text('第 2 题 · 填空'), findsOneWidget);
+    expect(find.text('B'), findsNothing);
+    expect(find.text('北京、上海'), findsNothing);
+    expect(find.byIcon(Icons.keyboard_arrow_down_rounded), findsNWidgets(2));
+  });
+
+  testWidgets('列表模式：点题号手风琴展开，再点收起', (tester) async {
+    await _pump(tester, stage: SolvingStage.completed, answers: _answers);
+    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.text('第 2 题 · 填空'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 只展开第 2 题
+    expect(find.text('北京、上海'), findsOneWidget);
+    expect(find.text('B'), findsNothing);
+
+    // 每行标题栏都能直接复制（不用先展开、也不用滚到底）
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey<String>('answer-row-2')),
+        matching: find.text('复制'),
+      ),
+    );
+    await tester.pump();
+    expect(_clipboard, '北京、上海');
+
+    await tester.tap(find.text('第 2 题 · 填空'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('北京、上海'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('换一批答案后自动回到展开态并清空手风琴', (tester) async {
+    final controller = await _pump(
+      tester,
+      stage: SolvingStage.completed,
+      answers: _answers,
+    );
+    await tester.tap(find.byKey(const ValueKey<String>('mode-list')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('第 1 题 · 单选'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('B'), findsOneWidget);
+
+    // 页面把 answers 换成了新一批
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 800,
+            child: AnswerFloatPanel(
+              controller: controller,
+              answers: const <AnswerEntry>[
+                AnswerEntry(index: 1, typeLabel: '简答', answer: '新答案'),
+              ],
+              onStartPressed: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('参考答案 1 条'), findsOneWidget);
+    // 手风琴已清空：列表模式下新答案也是收起的
+    expect(find.text('新答案'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }

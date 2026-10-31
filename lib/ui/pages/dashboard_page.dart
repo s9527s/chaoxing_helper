@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -114,14 +113,14 @@ enum _Urgency { urgent, soon, normal, expired }
 // ============================================================
 
 class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key, this.debugCourses, this.debugShortcuts});
+  const DashboardPage({super.key, this.previewCourses, this.previewShortcuts});
 
-  /// 仅用于测试/本地预览：传入后直接渲染这批数据，跳过「空状态」。
-  /// 生产环境保持 null，数据来自「手动进页面提取」。
-  final List<CourseGroup>? debugCourses;
+  /// 仅测试使用：注入这批课程数据，跳过本地缓存读取。
+  /// 生产环境恒为 null，数据来自用户手动提取后落盘的缓存。
+  final List<CourseGroup>? previewCourses;
 
-  /// 仅用于测试：直接注入课程快捷入口，跳过本地缓存读取。
-  final List<CourseRef>? debugShortcuts;
+  /// 仅测试使用：注入课程快捷入口，跳过本地缓存读取。
+  final List<CourseRef>? previewShortcuts;
 
   @override
   State<DashboardPage> createState() => _DashboardPageState();
@@ -187,7 +186,7 @@ class _DashboardPageState extends State<DashboardPage> {
     });
 
     // 3) 数据来源：调试注入 or 本地缓存（不做任何自动抓取）
-    final injected = widget.debugCourses;
+    final injected = widget.previewCourses;
     if (injected != null) {
       _courses = injected;
       _loadingCache = false;
@@ -199,7 +198,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
   /// 课程快捷入口单独加载：它和作业数据在业务上互不影响
   Future<void> _loadShortcuts() async {
-    final injected = widget.debugShortcuts;
+    final injected = widget.previewShortcuts;
     if (injected != null) {
       if (!mounted) return;
       setState(() => _shortcuts = injected);
@@ -231,59 +230,6 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   // ---------------- 数据 ----------------
-
-  /// 本地测试页地址（走 adb reverse 把电脑的 8899 转发到手机 127.0.0.1）
-  static const String _debugDefaultUrl = 'http://127.0.0.1:8899/index.html';
-
-  /// 调试用（仅 kDebugMode 可见）：在内置 WebView 打开任意 URL，
-  /// 配合仓库里的 mock_work/ 本地模拟作业页做端到端测试。
-  Future<void> _openDebugUrlDialog() async {
-    var input = _debugDefaultUrl;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('打开测试页'),
-        content: TextFormField(
-          initialValue: _debugDefaultUrl,
-          autocorrect: false,
-          enableSuggestions: false,
-          keyboardType: TextInputType.url,
-          onChanged: (value) => input = value,
-          decoration: const InputDecoration(
-            labelText: 'URL',
-            hintText: 'http://127.0.0.1:8899/index.html',
-            helperText: '需先执行 adb reverse tcp:8899 tcp:8899',
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () {
-              if (!dialogContext.mounted) return;
-              Navigator.of(dialogContext).pop(false);
-            },
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (!dialogContext.mounted) return;
-              Navigator.of(dialogContext).pop(true);
-            },
-            child: const Text('打开'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    final target = input.trim().isEmpty ? _debugDefaultUrl : input.trim();
-    await Navigator.of(context).push<List<HomeworkItem>>(
-      MaterialPageRoute<List<HomeworkItem>>(
-        builder: (_) => WorkWebViewPage(workTitle: '本地测试页', workUrl: target),
-      ),
-    );
-  }
 
   /// 打开内置浏览器，让用户手动点到「课程 → 作业」再点右上角提取。
   /// 这是当前唯一的数据来源：页面已经由用户手动打开，绕开了动态签名问题。
@@ -1142,12 +1088,6 @@ class _DashboardPageState extends State<DashboardPage> {
                 onPressed: _showKeyDialog,
                 icon: const Icon(Icons.settings_outlined, color: Colors.white, size: 22),
               ),
-              if (kDebugMode)
-                IconButton(
-                  tooltip: '打开测试页（debug）',
-                  onPressed: _openDebugUrlDialog,
-                  icon: const Icon(Icons.bug_report_outlined, color: Colors.white, size: 20),
-                ),
             ],
           ),
           const SizedBox(height: 2),
