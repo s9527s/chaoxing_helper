@@ -1,7 +1,9 @@
 import 'package:ai_web_reader/data/services/scanner_service.dart';
+import 'package:ai_web_reader/data/services/task_store.dart';
 import 'package:ai_web_reader/ui/pages/dashboard_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // 测试用固定数据（生产环境走 ScannerService 真实扫描）
 CourseTask _task(
@@ -28,8 +30,18 @@ List<CourseGroup> _previewCourses() {
       teacher: '共 2 份任务',
       accent: const Color(0xFF3F6BE0),
       tasks: <CourseTask>[
-        _task('高等数学 A', '第 3 章 极限 课后习题', TaskType.homework, const Duration(hours: 18)),
-        _task('高等数学 A', 'MATLAB 数值实验（视频实践）', TaskType.video, const Duration(hours: 30)),
+        _task(
+          '高等数学 A',
+          '第 3 章 极限 课后习题',
+          TaskType.homework,
+          const Duration(hours: 18),
+        ),
+        _task(
+          '高等数学 A',
+          'MATLAB 数值实验（视频实践）',
+          TaskType.video,
+          const Duration(hours: 30),
+        ),
       ],
     ),
     CourseGroup(
@@ -38,7 +50,12 @@ List<CourseGroup> _previewCourses() {
       accent: const Color(0xFF7C4DFF),
       tasks: <CourseTask>[
         _task('数据结构', '期中考试（机考）', TaskType.exam, const Duration(hours: 40)),
-        _task('数据结构', '第 4 章 树与二叉树 作业', TaskType.homework, const Duration(hours: 60)),
+        _task(
+          '数据结构',
+          '第 4 章 树与二叉树 作业',
+          TaskType.homework,
+          const Duration(hours: 60),
+        ),
       ],
     ),
     CourseGroup(
@@ -121,8 +138,10 @@ void main() {
 
     const earliest = '第 3 章 极限 课后习题'; // 18h
     const latest = '第 4 章 树与二叉树 作业'; // 60h
-    expect(tester.getTopLeft(find.text(earliest)).dy,
-        lessThan(tester.getTopLeft(find.text(latest)).dy));
+    expect(
+      tester.getTopLeft(find.text(earliest)).dy,
+      lessThan(tester.getTopLeft(find.text(latest)).dy),
+    );
   });
 
   testWidgets('点课程卡片弹出 BottomSheet，按截止倒序', (tester) async {
@@ -137,8 +156,10 @@ void main() {
 
     const later = '第 4 章 树与二叉树 作业'; // 60h
     const earlier = '期中考试（机考）'; // 40h
-    expect(tester.getTopLeft(find.text(later)).dy,
-        lessThan(tester.getTopLeft(find.text(earlier)).dy));
+    expect(
+      tester.getTopLeft(find.text(later)).dy,
+      lessThan(tester.getTopLeft(find.text(earlier)).dy),
+    );
 
     await tester.tap(find.byIcon(Icons.close_rounded));
     await tester.pump();
@@ -223,7 +244,12 @@ void main() {
         accent: const Color(0xFF3F6BE0),
         tasks: <CourseTask>[
           for (var i = 1; i <= 4; i++)
-            _task('英语四六级', '作业$i', TaskType.homework, const Duration(hours: 20)),
+            _task(
+              '英语四六级',
+              '作业$i',
+              TaskType.homework,
+              const Duration(hours: 20),
+            ),
           // 第 5 条已交：网页上不算未交，看板也不该 +1
           _task(
             '英语四六级',
@@ -265,6 +291,35 @@ void main() {
 
     expect(statValue(tester, 'stat-pending'), '2');
     expect(statValue(tester, 'stat-urgent'), '1');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('左滑卡片：作业立刻从看板消失，缓存同步覆盖', (tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await pumpDashboard(tester);
+
+    await tester.tap(find.text('作业'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(statValue(tester, 'stat-pending'), '4');
+    const target = '第 3 章 极限 课后习题';
+
+    // 往左滑过阈值 → Dismissible 收起 → 回调里删数据
+    await tester.drag(find.text(target), const Offset(-500, 0));
+    // Dismissible 收起动画结束后才回调 onDismissed，需要多推几帧
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+
+    expect(find.text(target), findsNothing);
+    expect(statValue(tester, 'stat-pending'), '3');
+    // 给了「撤销」的机会
+    expect(find.textContaining('已移除'), findsOneWidget);
+
+    // 已经落盘：杀进程重进也不会再出现
+    final saved = await TaskStore.load();
+    expect(saved.any((e) => e.title == target), isFalse);
     expect(tester.takeException(), isNull);
   });
 }

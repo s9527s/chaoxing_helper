@@ -9,6 +9,7 @@ import '../../core/config/app_config.dart';
 import '../../data/services/ai_solver_service.dart';
 import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
+import '../../data/services/submission_detector.dart';
 import '../theme/app_theme.dart';
 import '../widgets/answer_float_panel.dart';
 
@@ -312,6 +313,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
     if (_webViewController == null) return;
 
+    // 已交作业拦截：先只读判断一次，已提交就别浪费 AI 额度
+    if (await _guardSubmittedWork()) return;
+
     _isProcessing = true;
     _progressController.reset();
     // 新一轮开始：先清掉上一轮的答案，避免旧答案混进来
@@ -384,6 +388,115 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     } finally {
       _isProcessing = false;
     }
+  }
+
+  // ---------------- 已交作业拦截 ----------------
+
+  /// 只读探测「这份作业是不是已经交了」。
+  ///
+  /// 判据都不写页面：
+  ///  - 题目块存在，但页面上**一个可编辑控件都没有**（radio / checkbox / textarea
+  ///    全部 disabled 或 readonly）→ 这是提交后的只读视图；
+  ///  - 或者页面同时出现「我的答案」和「正确答案 / 参考答案」→ 批阅后的对答案视图；
+  ///  - 或者页面出现「已完成 / 已交」并且带分数 → 已批阅。
+  static const String _submissionProbeBody = r'''
+    var blocks = document.querySelectorAll('.TiMu, .questionLi');
+    var editable = document.querySelectorAll(
+      'textarea:not([readonly]):not([disabled]),' +
+      'input[type="text"]:not([readonly]):not([disabled]),' +
+      'input[type="radio"]:not([disabled]),' +
+      'input[type="checkbox"]:not([disabled]),' +
+      '[contenteditable="true"]'
+    ).length;
+    var text = (document.body && document.body.innerText) ? document.body.innerText : '';
+    var hits = [];
+    ['已提交', '已完成', '已交', '待批阅', '已批阅', '已通过'].forEach(function (w) {
+      if (text.indexOf(w) >= 0) hits.push(w);
+    });
+    var answerView = text.indexOf('我的答案') >= 0 &&
+      (text.indexOf('正确答案') >= 0 || text.indexOf('参考答案') >= 0);
+    var score = /\d+(\.\d+)?\s*分/.test(text);
+    return JSON.stringify({
+      questions: blocks.length,
+      editable: editable,
+      hits: hits.join(','),
+      answerView: answerView,
+      score: score
+    });
+  ''';
+
+  Future<Map<String, dynamic>?> _probeSubmission() async {
+    final controller = _webViewController;
+    if (controller == null) return null;
+    try {
+      final result = await controller.callAsyncJavaScript(
+        functionBody: _submissionProbeBody,
+      );
+      final raw = (result?.value ?? '').toString();
+      if (raw.isEmpty || raw == 'null') return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      return Map<String, dynamic>.from(decoded);
+    } catch (e) {
+      // 页面正在跳转时可能失败：判不出来就放行，不误拦
+      debugPrint('[WorkWebView] 提交状态探测失败: $e');
+      return null;
+    }
+  }
+
+  /// 页面状态 → 是否已交。判据抽在 [looksSubmittedFromProbe]（纯函数，可单测）。
+  bool _looksSubmitted(Map<String, dynamic> state) =>
+      looksSubmittedFromProbe(state);
+
+  /// 已交就弹窗拦下，返回 true 表示「别继续了」
+  Future<bool> _guardSubmittedWork() async {
+    // 一、先看地址：
+    //    /work/view  → 已提交的只读视图
+    //    /work/dowork、/work/task → 正在作答，绝不能拦（作文题的编辑器在 iframe 里，
+    //    页面探测会误判成「没有可填控件」，所以这里直接放行、不再探测）
+    var submitted = false;
+    var kind = WorkPageKind.unknown;
+    try {
+      final url = (await _webViewController?.getUrl())?.toString() ?? '';
+      kind = workPageKindFromUrl(url);
+      if (kind == WorkPageKind.submitted) {
+        submitted = true;
+        _log('⛔ 当前是已提交作业的只读视图，已拦下这次 AI 请求（不消耗额度）');
+      }
+    } catch (e) {
+      debugPrint('[WorkWebView] 读取当前地址失败: $e');
+    }
+
+    // 二、地址看不出来时再看页面：题目全只读，或出现「我的答案 + 正确答案」
+    if (kind == WorkPageKind.unknown) {
+      final state = await _probeSubmission();
+      submitted = state != null && _looksSubmitted(state);
+      if (submitted) {
+        _log('⛔ 页面显示作业已提交，已拦下这次 AI 请求（不消耗额度）');
+      }
+    }
+
+    if (!submitted) return false;
+    if (!mounted) return true;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.verified_rounded, color: AppColors.success),
+        title: const Text('当前作业已完成'),
+        content: const Text(
+          '当前作业已完成，无需提取。\n\n'
+          '网页上这份作业已经是提交/批阅后的只读状态，这次不会发起 AI 请求。',
+        ),
+        actions: <Widget>[
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+    return true;
   }
 
   /// 只读采集页面指纹（连 input.value 都只读取，绝不赋值）
@@ -527,6 +640,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
       _showSnack('页面还没准备好，请稍候再试');
       return;
     }
+
+    // 已交作业拦截：这份作业已经提交/批阅，提了也没意义，别浪费后续 AI 请求
+    if (await _guardSubmittedWork()) return;
 
     try {
       _log('正在提取本页作业…');

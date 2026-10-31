@@ -7,6 +7,7 @@ import '../../core/config/app_config.dart';
 import '../../core/network/cookie_sync_helper.dart';
 import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
+import '../../data/services/task_refresh_service.dart';
 import '../../data/services/task_store.dart';
 import 'login_page.dart';
 import 'work_webview_page.dart';
@@ -42,6 +43,7 @@ class CourseTask {
     this.deadlineUnknown = false,
     this.identity,
     this.status = '未知',
+    this.stableKey,
   });
 
   final String title;
@@ -58,6 +60,18 @@ class CourseTask {
 
   /// 页面上的状态文案：未交 / 待交 / 已交 …
   final String status;
+
+  /// 与本地缓存里 [HomeworkItem.stableKey] 对齐的键（侧滑删除按它对号入座）
+  final String? stableKey;
+
+  /// 侧滑删除 / 列表 key 用的唯一行标识
+  String get rowKey {
+    final stable = stableKey;
+    if (stable != null && stable.isNotEmpty) return stable;
+    final id = identity;
+    if (id != null && id.isNotEmpty) return id;
+    return 'sig:$courseName|$title|${deadline.toIso8601String()}';
+  }
 
   bool get highRisk => type.highRisk;
 
@@ -158,6 +172,12 @@ class _DashboardPageState extends State<DashboardPage> {
   /// 首帧读缓存期间显示 loading，避免闪一下空态
   bool _loadingCache = true;
 
+  /// 「刷新」进行中：刷新图标换成转圈，防止连点
+  bool _refreshing = false;
+
+  /// 数据版本号：导入/刷新/删除后 +1，用来给列表做平滑过渡动画
+  int _dataVersion = 0;
+
   /// 课程色板，按出现顺序循环取色
   static const List<Color> _coursePalette = <Color>[
     Color(0xFF3F6BE0),
@@ -193,6 +213,21 @@ class _DashboardPageState extends State<DashboardPage> {
     final injected = widget.previewCourses;
     if (injected != null) {
       _courses = injected;
+      // 注入模式下也补一份 _items：侧滑删除要按稳定键从原始列表里摘掉这条
+      _items = <HomeworkItem>[
+        for (final course in injected)
+          for (final task in course.tasks)
+            HomeworkItem(
+              courseName: task.courseName,
+              title: task.title,
+              kind: task.type == TaskType.homework
+                  ? HomeworkKind.homework
+                  : HomeworkKind.exam,
+              url: task.url,
+              status: task.status,
+              deadline: task.deadlineUnknown ? null : task.deadline,
+            ),
+      ];
       _loadingCache = false;
       _loadShortcuts();
       return;
@@ -313,6 +348,7 @@ class _DashboardPageState extends State<DashboardPage> {
     deadlineUnknown: item.deadline == null,
     identity: item.identity,
     status: item.status,
+    stableKey: item.stableKey,
   );
 
   /// 按课程分组（保持首次出现顺序）
@@ -462,6 +498,7 @@ class _DashboardPageState extends State<DashboardPage> {
       _items = merged.items;
       _courses = _groupByCourse(merged.items);
       _now = DateTime.now();
+      _dataVersion++;
     });
 
     await TaskStore.save(merged.items);
@@ -471,6 +508,149 @@ class _DashboardPageState extends State<DashboardPage> {
     if (merged.replaced > 0) parts.add('覆盖旧数据 ${merged.replaced} 条');
     if (merged.dropped > 0) parts.add('过滤 ${merged.dropped} 条');
     _toast(parts.join(' · '));
+  }
+
+  // ---------------- 刷新（用户主动触发，仅看板已有课程） ----------------
+
+  /// 给看板上的某门课找一份可用的课程引用。
+  ///
+  /// 优先「入口」里同名的课程（信息最全，带 cpi/enc，能直接打开作业列表）；
+  /// 没有的话从它任一作业 URL 反解 courseId / classId（作业页 URL 上一定有）。
+  CourseRef? _refForCourse(CourseGroup group) {
+    final name = group.name.trim();
+    for (final ref in _shortcuts) {
+      if (ref.hasIds && ref.courseName.trim() == name) return ref;
+    }
+    for (final task in group.tasks) {
+      final ref = CourseRef.fromUrl(task.url, courseName: group.name);
+      if (ref != null && ref.hasIds) return ref;
+    }
+    return null;
+  }
+
+  /// 顶部刷新：用**已登录的 Cookie** 把看板里已有课程的作业列表各请求一次。
+  ///
+  /// 不做全量抓取、不做后台轮询：只有手指点到这个按钮才会发请求，
+  /// 而且只请求看板上已经存在的课程，最多 3 个并发。
+  Future<void> _refreshAll() async {
+    if (_refreshing) return;
+    if (_courses.isEmpty) {
+      _toast('看板还没有作业，请先点「读取作业」提取一次');
+      return;
+    }
+
+    final targets = <String, CourseRef>{};
+    var missing = 0;
+    for (final course in _courses) {
+      final ref = _refForCourse(course);
+      if (ref == null) {
+        missing++;
+        continue;
+      }
+      targets.putIfAbsent(ref.key, () => ref);
+    }
+
+    if (targets.isEmpty) {
+      _toast('这些课程还没有课程入口，无法单独刷新；请点「读取作业」进网页重新提取');
+      return;
+    }
+
+    setState(() => _refreshing = true);
+    try {
+      final outcomes = await TaskRefreshService.instance.refreshCourses(
+        targets.values.toList(),
+        onLog: (message) => debugPrint('[Refresh] $message'),
+      );
+      if (!mounted) return;
+
+      final next = TaskRefreshService.applyRefresh(_items, outcomes);
+      final okCount = outcomes.where((o) => o.ok).length;
+      final failed = outcomes.where((o) => !o.ok).length;
+      final cleared = outcomes.where((o) => o.isEmpty).length;
+
+      setState(() {
+        _items = next;
+        _courses = _groupByCourse(next);
+        _now = DateTime.now();
+        _dataVersion++;
+      });
+      await TaskStore.save(next);
+
+      if (!mounted) return;
+      final parts = <String>['刷新完成：$okCount 门课'];
+      if (cleared > 0) parts.add('$cleared 门已无未交作业');
+      if (failed > 0) parts.add('$failed 门失败（保留旧数据）');
+      if (missing > 0) parts.add('$missing 门缺入口跳过');
+      _toast(parts.join(' · '));
+    } catch (e) {
+      if (mounted) _toast('刷新失败：$e');
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  // ---------------- 侧滑删除（交了作业就让它消失） ----------------
+
+  /// 从看板与本地缓存里彻底移除一条作业。
+  ///
+  /// 用户在图上的操作：在网页上把作业交了 → 回看板往左滑这条卡片 → 它立刻消失，
+  /// 缓存同时被覆盖写，杀掉进程重进也不会再出现。
+  void _removeTask(CourseTask task) {
+    final snapshot = List<HomeworkItem>.of(_items);
+    final key = task.rowKey;
+
+    var next = _items.where((e) => e.stableKey != key).toList();
+    if (next.length == _items.length) {
+      // 缓存里没有完全一致的稳定键（老数据/兜底签名）→ 退化成「课程 + 标题」
+      next = _items
+          .where(
+            (e) => !(e.courseName == task.courseName && e.title == task.title),
+          )
+          .toList();
+    }
+    if (next.length == _items.length) return;
+
+    setState(() {
+      _items = next;
+      _courses = _groupByCourse(next);
+      _dataVersion++;
+    });
+    unawaited(_persist(next));
+    _toastUndo(task, snapshot);
+  }
+
+  /// 落盘（覆盖写）。写失败只打日志：界面上这条记录已经删掉了，不能因此崩掉。
+  Future<void> _persist(List<HomeworkItem> items) async {
+    try {
+      await TaskStore.save(items);
+    } catch (e) {
+      debugPrint('[Dashboard] 缓存写入失败: $e');
+    }
+  }
+
+  /// 删除后的提示条：带「撤销」，误滑了可以立刻找回
+  void _toastUndo(CourseTask task, List<HomeworkItem> snapshot) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('已移除「${task.title}」'),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: '撤销',
+            onPressed: () {
+              if (!mounted) return;
+              setState(() {
+                _items = snapshot;
+                _courses = _groupByCourse(snapshot);
+                _dataVersion++;
+              });
+              unawaited(_persist(snapshot));
+            },
+          ),
+        ),
+      );
   }
 
   /// 清空本地缓存（二次确认，避免误触）
@@ -600,76 +780,89 @@ class _DashboardPageState extends State<DashboardPage> {
           top: Radius.circular(AppRadius.panel),
         ),
       ),
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFCBD5E1),
-                    borderRadius: BorderRadius.circular(2),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFCBD5E1),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      course.name,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.ink,
+                const SizedBox(height: 14),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Text(
+                        course.name,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.ink,
+                        ),
                       ),
                     ),
-                  ),
-                  Text(
-                    '${course.taskCount} 份待办',
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      color: AppColors.secondary,
+                    Text(
+                      '${sorted.length} 份待办',
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: AppColors.secondary,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  IconButton(
-                    onPressed: () {
-                      if (!sheetContext.mounted) return;
-                      Navigator.of(sheetContext).pop();
-                    },
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      size: 20,
-                      color: AppColors.secondary,
+                    const SizedBox(width: 4),
+                    IconButton(
+                      onPressed: () {
+                        if (!sheetContext.mounted) return;
+                        Navigator.of(sheetContext).pop();
+                      },
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        size: 20,
+                        color: AppColors.secondary,
+                      ),
+                      tooltip: '关闭',
                     ),
-                    tooltip: '关闭',
-                  ),
-                ],
-              ),
-              const Text(
-                '按截止时间倒序排列',
-                style: TextStyle(fontSize: 11.5, color: AppColors.muted),
-              ),
-              const SizedBox(height: 6),
-              Flexible(
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.only(top: 4),
-                  itemCount: sorted.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(height: 10),
-                  itemBuilder: (_, index) =>
-                      _buildTaskTile(sorted[index], DateTime.now()),
+                  ],
                 ),
-              ),
-            ],
+                const Text(
+                  '按截止时间倒序排列',
+                  style: TextStyle(fontSize: 11.5, color: AppColors.muted),
+                ),
+                const SizedBox(height: 6),
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.only(top: 4),
+                    itemCount: sorted.length,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 12),
+                    itemBuilder: (_, index) {
+                      final task = sorted[index];
+                      return Dismissible(
+                        key: ValueKey<String>('sheet-dismiss-${task.rowKey}'),
+                        direction: DismissDirection.endToStart,
+                        background: _buildDismissBackground(),
+                        onDismissed: (_) {
+                          setSheetState(() => sorted.removeAt(index));
+                          _removeTask(task);
+                        },
+                        child: _buildTaskTile(task, DateTime.now()),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1139,11 +1332,10 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  /// 顶部统计大卡片：主色渐变 + 三块等宽毛玻璃小卡
+  /// 顶部统计大卡片：主色渐变 + 流光 + 三块等宽毛玻璃小卡
   Widget _buildStatCard() {
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      padding: const EdgeInsets.fromLTRB(18, 14, 12, 16),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
         gradient: const LinearGradient(
@@ -1159,139 +1351,151 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              const Expanded(
-                child: Text(
-                  '作业看板',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.3,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-              PopupMenuButton<SortMode>(
-                tooltip: '排序方式',
-                initialValue: _sortMode,
-                onSelected: _changeSort,
-                position: PopupMenuPosition.under,
-                itemBuilder: (context) => SortMode.values
-                    .map(
-                      (mode) => PopupMenuItem<SortMode>(
-                        value: mode,
-                        child: Row(
-                          children: <Widget>[
-                            Icon(
-                              mode == _sortMode
-                                  ? Icons.check_circle_rounded
-                                  : Icons.circle_outlined,
-                              size: 16,
-                              color: mode == _sortMode
-                                  ? AppColors.primary
-                                  : AppColors.muted,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(mode.label),
-                          ],
+      // 裁切只作用于内容：渐变底与外侧阴影留在外层 Container
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Stack(
+          children: <Widget>[
+            const Positioned.fill(child: _CardShimmer()),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 12, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      const Expanded(
+                        child: Text(
+                          '作业看板',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.3,
+                            color: Colors.white,
+                          ),
                         ),
                       ),
-                    )
-                    .toList(),
-                child: _buildHeaderIcon(Icons.swap_vert_rounded),
-              ),
-              _buildHeaderIcon(
-                Icons.settings_outlined,
-                tooltip: '模型设置',
-                onTap: _showKeyDialog,
-              ),
-              _buildHeaderIcon(
-                Icons.refresh_rounded,
-                tooltip: '重新提取（覆盖旧数据）',
-                onTap: _openManualEntry,
-              ),
-              PopupMenuButton<String>(
-                tooltip: '更多',
-                position: PopupMenuPosition.under,
-                onSelected: (value) {
-                  if (value == 'clear') _confirmClear();
-                  if (value == 'import') _openCourseImport();
-                  if (value == 'logout') _logout();
-                },
-                itemBuilder: (context) => const <PopupMenuEntry<String>>[
-                  PopupMenuItem<String>(
-                    value: 'import',
-                    child: Row(
-                      children: <Widget>[
-                        Icon(Icons.menu_book_outlined, size: 18),
-                        SizedBox(width: 8),
-                        Text('导入课程入口'),
-                      ],
-                    ),
+                      PopupMenuButton<SortMode>(
+                        tooltip: '排序方式',
+                        initialValue: _sortMode,
+                        onSelected: _changeSort,
+                        position: PopupMenuPosition.under,
+                        itemBuilder: (context) => SortMode.values
+                            .map(
+                              (mode) => PopupMenuItem<SortMode>(
+                                value: mode,
+                                child: Row(
+                                  children: <Widget>[
+                                    Icon(
+                                      mode == _sortMode
+                                          ? Icons.check_circle_rounded
+                                          : Icons.circle_outlined,
+                                      size: 16,
+                                      color: mode == _sortMode
+                                          ? AppColors.primary
+                                          : AppColors.muted,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(mode.label),
+                                  ],
+                                ),
+                              ),
+                            )
+                            .toList(),
+                        child: _buildHeaderIcon(Icons.swap_vert_rounded),
+                      ),
+                      _buildHeaderIcon(
+                        Icons.settings_outlined,
+                        tooltip: '模型设置',
+                        onTap: _showKeyDialog,
+                      ),
+                      _buildRefreshButton(),
+                      PopupMenuButton<String>(
+                        tooltip: '更多',
+                        position: PopupMenuPosition.under,
+                        onSelected: (value) {
+                          if (value == 'clear') _confirmClear();
+                          if (value == 'import') _openCourseImport();
+                          if (value == 'logout') _logout();
+                        },
+                        itemBuilder: (context) =>
+                            const <PopupMenuEntry<String>>[
+                              PopupMenuItem<String>(
+                                value: 'import',
+                                child: Row(
+                                  children: <Widget>[
+                                    Icon(Icons.menu_book_outlined, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('导入课程入口'),
+                                  ],
+                                ),
+                              ),
+                              PopupMenuItem<String>(
+                                value: 'clear',
+                                child: Row(
+                                  children: <Widget>[
+                                    Icon(Icons.delete_sweep_outlined, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('清空本地数据'),
+                                  ],
+                                ),
+                              ),
+                              PopupMenuDivider(height: 8),
+                              PopupMenuItem<String>(
+                                value: 'logout',
+                                child: Row(
+                                  children: <Widget>[
+                                    Icon(
+                                      Icons.logout_rounded,
+                                      size: 18,
+                                      color: AppColors.danger,
+                                    ),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      '退出登录',
+                                      style: TextStyle(color: AppColors.danger),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                        child: _buildHeaderIcon(Icons.more_horiz_rounded),
+                      ),
+                    ],
                   ),
-                  PopupMenuItem<String>(
-                    value: 'clear',
-                    child: Row(
-                      children: <Widget>[
-                        Icon(Icons.delete_sweep_outlined, size: 18),
-                        SizedBox(width: 8),
-                        Text('清空本地数据'),
-                      ],
-                    ),
-                  ),
-                  PopupMenuDivider(height: 8),
-                  PopupMenuItem<String>(
-                    value: 'logout',
-                    child: Row(
-                      children: <Widget>[
-                        Icon(
-                          Icons.logout_rounded,
-                          size: 18,
-                          color: AppColors.danger,
+                  const SizedBox(height: 16),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: _buildStatTile(
+                          '总待办',
+                          _pendingCount,
+                          const ValueKey<String>('stat-pending'),
                         ),
-                        SizedBox(width: 8),
-                        Text('退出登录', style: TextStyle(color: AppColors.danger)),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _buildStatTile(
+                          '紧急',
+                          _urgentCount,
+                          const ValueKey<String>('stat-urgent'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _buildStatTile(
+                          '高风险',
+                          _highRiskCount,
+                          const ValueKey<String>('stat-risk'),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
-                child: _buildHeaderIcon(Icons.more_horiz_rounded),
               ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: _buildStatTile(
-                  '总待办',
-                  '$_pendingCount',
-                  const ValueKey<String>('stat-pending'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _buildStatTile(
-                  '紧急',
-                  '$_urgentCount',
-                  const ValueKey<String>('stat-urgent'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _buildStatTile(
-                  '高风险',
-                  '$_highRiskCount',
-                  const ValueKey<String>('stat-risk'),
-                ),
-              ),
-            ],
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1323,8 +1527,46 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  /// 毛玻璃质感的小统计卡
-  Widget _buildStatTile(String label, String value, Key valueKey) {
+  /// 刷新按钮：进行中显示转圈，避免连点发起多轮请求
+  Widget _buildRefreshButton() {
+    return Tooltip(
+      message: '刷新（只请求看板里已有的课程）',
+      child: GestureDetector(
+        key: const ValueKey<String>('refresh-button'),
+        behavior: HitTestBehavior.opaque,
+        onTap: _refreshing ? null : _refreshAll,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: _refreshing ? 0.28 : 0.16),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: _refreshing
+                ? const SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(
+                    Icons.refresh_rounded,
+                    size: 19,
+                    color: Colors.white,
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 毛玻璃质感的小统计卡（数字 32sp，等宽，变化时平滑滚动）
+  Widget _buildStatTile(String label, int count, Key valueKey) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -1336,15 +1578,16 @@ class _DashboardPageState extends State<DashboardPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Text(
-            value,
-            key: valueKey,
-            maxLines: 1,
+          _AnimatedCount(
+            value: count,
+            valueKey: valueKey,
             style: const TextStyle(
-              fontSize: 26,
+              fontSize: 32,
               fontWeight: FontWeight.w700,
-              height: 1.1,
+              height: 1.05,
+              letterSpacing: -0.5,
               color: Colors.white,
+              fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
             ),
           ),
           const SizedBox(height: 2),
@@ -1355,6 +1598,7 @@ class _DashboardPageState extends State<DashboardPage> {
             style: TextStyle(
               fontSize: 12,
               height: 1.2,
+              letterSpacing: 0.2,
               color: Colors.white.withValues(alpha: 0.88),
             ),
           ),
@@ -1504,16 +1748,26 @@ class _DashboardPageState extends State<DashboardPage> {
     final courses = _sortedCourses;
     if (courses.isEmpty) return _buildEmptyState();
 
-    return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-        mainAxisExtent: 152,
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 240),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInOutCubic,
+      child: GridView.builder(
+        // 刷新 / 删除后整表换一批，用淡入过渡而不是硬闪
+        key: ValueKey<String>('course-grid-$_dataVersion'),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          mainAxisExtent: 152,
+        ),
+        itemCount: courses.length,
+        itemBuilder: (context, index) => _Entrance(
+          index: index,
+          child: _buildCourseCard(courses[index], now),
+        ),
       ),
-      itemCount: courses.length,
-      itemBuilder: (context, index) => _buildCourseCard(courses[index], now),
     );
   }
 
@@ -1614,11 +1868,64 @@ class _DashboardPageState extends State<DashboardPage> {
     final tasks = _sortedTasks;
     if (tasks.isEmpty) return _buildEmptyState();
 
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
-      itemCount: tasks.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 10),
-      itemBuilder: (context, index) => _buildTaskTile(tasks[index], now),
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInOutCubic,
+      // 导入 / 刷新后整表换一批数据，用淡入过渡而不是硬闪
+      child: ListView.separated(
+        key: ValueKey<String>('task-list-$_dataVersion'),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+        itemCount: tasks.length,
+        separatorBuilder: (context, index) => const SizedBox(height: 12),
+        itemBuilder: (context, index) {
+          final task = tasks[index];
+          return _Entrance(
+            index: index,
+            child: Dismissible(
+              key: ValueKey<String>('task-dismiss-${task.rowKey}'),
+              direction: DismissDirection.endToStart,
+              dismissThresholds: const <DismissDirection, double>{
+                DismissDirection.endToStart: 0.32,
+              },
+              background: _buildDismissBackground(),
+              onDismissed: (_) => _removeTask(task),
+              child: _buildTaskTile(task, now),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 左滑时露出的底色：红底 + 「交了，移除」
+  Widget _buildDismissBackground() {
+    return Container(
+      alignment: Alignment.centerRight,
+      padding: const EdgeInsets.only(right: 18),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        gradient: const LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: <Color>[Color(0xFFFEE2E2), AppColors.danger],
+        ),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+          SizedBox(width: 6),
+          Text(
+            '交了，移除',
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1658,16 +1965,18 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
         Expanded(
           child: GridView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
               mainAxisExtent: 152,
             ),
             itemCount: sorted.length,
-            itemBuilder: (context, index) =>
-                _buildShortcutCard(sorted[index], index, counts),
+            itemBuilder: (context, index) => _Entrance(
+              index: index,
+              child: _buildShortcutCard(sorted[index], index, counts),
+            ),
           ),
         ),
       ],
@@ -1867,7 +2176,8 @@ class _DashboardPageState extends State<DashboardPage> {
     };
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      // 卡片间距统一由列表的 separator（12dp）负责，这里不再额外留白
+      padding: EdgeInsets.zero,
       child: Material(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(AppRadius.card),
@@ -1885,7 +2195,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 children: <Widget>[
                   // 左侧 4dp 全圆角状态彩条
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 14, 0, 14),
+                    padding: const EdgeInsets.fromLTRB(8, 16, 0, 16),
                     child: Container(
                       width: 4,
                       decoration: BoxDecoration(
@@ -1896,7 +2206,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(14, 14, 16, 14),
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
@@ -2036,6 +2346,8 @@ class _DashboardPageState extends State<DashboardPage> {
           fontWeight: FontWeight.w700,
           height: 1.2,
           color: fg,
+          // 等宽数字：倒计时每秒跳动时不会左右抖
+          fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
         ),
       ),
     );
@@ -2136,6 +2448,126 @@ class _DashboardPageState extends State<DashboardPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 数字平滑滚动（计数从旧值滚到新值，等宽数字保证不晃）
+class _AnimatedCount extends StatelessWidget {
+  const _AnimatedCount({
+    required this.value,
+    required this.valueKey,
+    this.style,
+  });
+
+  final int value;
+  final Key valueKey;
+  final TextStyle? style;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      // begin 仅在首帧生效：首帧直接显示真实值，不做从 0 起跳的动画
+      tween: Tween<double>(begin: value.toDouble(), end: value.toDouble()),
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      builder: (context, animated, _) =>
+          Text('${animated.round()}', key: valueKey, maxLines: 1, style: style),
+    );
+  }
+}
+
+/// 顶部统计卡上的流光：一条极淡的白色光带缓慢斜向扫过
+class _CardShimmer extends StatefulWidget {
+  const _CardShimmer();
+
+  @override
+  State<_CardShimmer> createState() => _CardShimmerState();
+}
+
+class _CardShimmerState extends State<_CardShimmer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 3400),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final height = constraints.maxHeight;
+          return AnimatedBuilder(
+            animation: _controller,
+            builder: (context, _) {
+              final dx = -0.4 * width + _controller.value * 1.8 * width;
+              return Stack(
+                clipBehavior: Clip.hardEdge,
+                children: <Widget>[
+                  Transform.translate(
+                    offset: Offset(dx, 0),
+                    child: Transform.rotate(
+                      angle: 0.22,
+                      child: Container(
+                        width: 110,
+                        height: height * 1.8,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.centerLeft,
+                            end: Alignment.centerRight,
+                            colors: <Color>[
+                              Colors.white.withValues(alpha: 0),
+                              Colors.white.withValues(alpha: 0.14),
+                              Colors.white.withValues(alpha: 0),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// 列表项入场：淡入 + 轻微上移（无定时器，滚回不会重放）
+class _Entrance extends StatelessWidget {
+  const _Entrance({required this.index, required this.child});
+
+  final int index;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final start = index.clamp(0, 8) * 0.055;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 340),
+      curve: Interval(start, 1, curve: Curves.easeOutCubic),
+      builder: (context, value, inner) {
+        final t = value.clamp(0.0, 1.0);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 10),
+            child: inner,
+          ),
+        );
+      },
+      child: child,
     );
   }
 }

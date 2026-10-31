@@ -55,6 +55,9 @@ class AppRadius {
 
   static const double card = 16;
   static const double panel = 24;
+
+  /// 悬浮答案面板：比普通弹层再圆一点，贴边浮起来时更有质感
+  static const double panelLarge = 28;
   static const double pill = 20;
 }
 

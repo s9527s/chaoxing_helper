@@ -50,9 +50,7 @@ class HomeworkItem {
 
   /// 是否已提交（已交 / 已完成）
   bool get isSubmitted =>
-      status.contains('已交') ||
-          status.contains('已完成') ||
-          status.contains('已提交');
+      status.contains('已交') || status.contains('已完成') || status.contains('已提交');
 
   /// 已结束/已失效的状态词：出现任一就绝不是待办
   static const List<String> _closedStatusKeywords = <String>[
@@ -160,14 +158,14 @@ class HomeworkItem {
 
   /// 序列化（供本地缓存使用）
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'courseName': courseName,
-        'title': title,
-        'kind': kind.name,
-        'url': url,
-        'status': status,
-        'deadline': deadline?.toIso8601String(),
-        'identity': identity,
-      };
+    'courseName': courseName,
+    'title': title,
+    'kind': kind.name,
+    'url': url,
+    'status': status,
+    'deadline': deadline?.toIso8601String(),
+    'identity': identity,
+  };
 
   factory HomeworkItem.fromJson(Map<String, dynamic> json) {
     final rawKind = (json['kind'] ?? '').toString();
@@ -204,6 +202,33 @@ class HomeworkItem {
     final hours = hoursLeft;
     return hours != null && !isExpired && hours < 24;
   }
+}
+
+/// 一次作业列表解析的完整快照。
+///
+/// 只多记了两个计数，用途很具体：用户点「刷新」时，要把「这门课一条作业都没有」
+/// 和「页面上全是已交」区分开——
+///  - `totalRows > 0 && pending.isEmpty` → 这门课确实归零了，看板要把它移除；
+///  - `totalRows == 0` → 多半是页面没抓到（权限/登录态问题），**不能**据此清库。
+class TaskListSnapshot {
+  const TaskListSnapshot({
+    required this.pending,
+    required this.totalRows,
+    required this.skippedRows,
+  });
+
+  /// 未交/待交的作业（可直接进看板）
+  final List<HomeworkItem> pending;
+
+  /// 页面上看起来像作业行的总行数（含已交、已批阅、重复行）
+  final int totalRows;
+
+  /// 其中因为「已交/已批阅/重复」被跳过的行数
+  final int skippedRows;
+
+  bool get hasRows => totalRows > 0;
+
+  int get pendingCount => pending.length;
 }
 
 /// 课程引用：从课程列表页解析出来的最小信息。
@@ -256,32 +281,29 @@ class CourseRef {
   String get entryUrl => homeUrl.isNotEmpty ? homeUrl : workListUrl;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'courseName': courseName,
-        'courseId': courseId,
-        'classId': classId,
-        'cpi': cpi,
-        'enc': enc,
-        'homeUrl': homeUrl,
-      };
+    'courseName': courseName,
+    'courseId': courseId,
+    'classId': classId,
+    'cpi': cpi,
+    'enc': enc,
+    'homeUrl': homeUrl,
+  };
 
   factory CourseRef.fromJson(Map<String, dynamic> json) => CourseRef(
-        courseName: (json['courseName'] ?? '').toString(),
-        courseId: (json['courseId'] ?? '').toString(),
-        classId: (json['classId'] ?? '').toString(),
-        cpi: (json['cpi'] ?? '').toString(),
-        enc: (json['enc'] ?? '').toString(),
-        homeUrl: (json['homeUrl'] ?? '').toString(),
-      );
+    courseName: (json['courseName'] ?? '').toString(),
+    courseId: (json['courseId'] ?? '').toString(),
+    classId: (json['classId'] ?? '').toString(),
+    cpi: (json['cpi'] ?? '').toString(),
+    enc: (json['enc'] ?? '').toString(),
+    homeUrl: (json['homeUrl'] ?? '').toString(),
+  );
 
   /// 从一个学习通页面地址里反解出课程引用。
   ///
   /// 用于「用户手动进到某门课的作业列表页再点提取」时把这门课记下来：
   /// 页面 URL 上带什么参数就存什么（含 enc / stuenc），下次直接跳过去。
   /// 拿不到 courseId + classId 时返回 null。
-  static CourseRef? fromUrl(
-    String url, {
-    String courseName = '',
-  }) {
+  static CourseRef? fromUrl(String url, {String courseName = ''}) {
     if (url.trim().isEmpty) return null;
 
     final uri = Uri.tryParse(_decodeEntities(url.trim()));
@@ -332,7 +354,9 @@ class CourseRef {
     // 保留信息量更大的那个地址：带 enc 的优先（它能直接打开作业列表）
     final mineHome = homeUrl;
     final otherHome = other.homeUrl;
-    final preferredHome = _score(otherHome) > _score(mineHome) ? otherHome : mineHome;
+    final preferredHome = _score(otherHome) > _score(mineHome)
+        ? otherHome
+        : mineHome;
 
     return CourseRef(
       courseName: other.courseName.isNotEmpty ? other.courseName : courseName,
@@ -352,7 +376,6 @@ class CourseRef {
     if (lower.contains('/work/') || lower.contains('workid=')) return 2;
     return 1;
   }
-
 }
 
 /// 页面 HTML 解析服务。
@@ -499,9 +522,8 @@ class ScannerService {
       final onclick = el.attributes['onclick'] ?? '';
       if (!onclick.toLowerCase().contains('courseid=')) continue;
 
-      final match = RegExp(
-        r'''['"]([^'"]*courseid=[^'"]*)['"]''',
-      ).firstMatch(onclick);
+      final match = RegExp(r'''['"]([^'"]*courseid=[^'"]*)['"]''')
+          .firstMatch(onclick);
       final href = (match?.group(1) ?? '').trim();
       if (href.isEmpty || !seen.add(href)) continue;
 
@@ -515,7 +537,8 @@ class ScannerService {
 
   /// 课程名：`span.course-name` 文本 → 其 title 属性 → a 的 title → a 的纯文本
   String _readCourseName(dom.Element anchor) {
-    final nameNode = anchor.querySelector('span.course-name') ??
+    final nameNode =
+        anchor.querySelector('span.course-name') ??
         anchor.querySelector('.course-name');
 
     if (nameNode != null) {
@@ -564,7 +587,10 @@ class ScannerService {
 
   /// 供「可见 WebView 抓取」使用：把当前页面的 outerHTML 直接解析成任务列表。
   /// 绕开作业列表页需要 enc 的问题——页面已经是用户手动打开好的。
-  List<HomeworkItem> parseTasksFromHtml(String html, {String courseName = '本页作业'}) {
+  List<HomeworkItem> parseTasksFromHtml(
+    String html, {
+    String courseName = '本页作业',
+  }) {
     final items = _parseCourseTasks(
       CourseRef(courseName: courseName, courseId: '', classId: ''),
       html,
@@ -573,12 +599,30 @@ class ScannerService {
     return items;
   }
 
+  /// 「刷新」用：解析一门课的作业列表，同时返回总行数。
+  ///
+  /// 仍然是**纯解析**，不发请求；HTML 由调用方用已登录的 Cookie 取回。
+  TaskListSnapshot parseWorkListSnapshot(
+    String html, {
+    required String courseName,
+  }) {
+    final snapshot = _parseCourseTasksSnapshot(
+      CourseRef(courseName: courseName, courseId: '', classId: ''),
+      html,
+    );
+    debugPrint(
+      '[Scanner] 刷新 $courseName: 共 ${snapshot.totalRows} 行，'
+      '未交 ${snapshot.pendingCount} 条，跳过 ${snapshot.skippedRows} 行',
+    );
+    return snapshot;
+  }
+
   /// 供单元测试直接喂 HTML 片段，避免依赖网络。
   @visibleForTesting
   List<HomeworkItem> parseCourseTasksHtml(
-      String html, {
-        String courseName = '测试课程',
-      }) {
+    String html, {
+    String courseName = '测试课程',
+  }) {
     return _parseCourseTasks(
       CourseRef(courseName: courseName, courseId: '', classId: ''),
       html,
@@ -597,12 +641,16 @@ class ScannerService {
   ///   </div>
   /// </li>
   /// ```
-  List<HomeworkItem> _parseCourseTasks(CourseRef course, String html) {
+  List<HomeworkItem> _parseCourseTasks(CourseRef course, String html) =>
+      _parseCourseTasksSnapshot(course, html).pending;
+
+  TaskListSnapshot _parseCourseTasksSnapshot(CourseRef course, String html) {
     final document = html_parser.parse(html);
     final items = <HomeworkItem>[];
     final seen = <String>{};
     var skippedByStatus = 0;
     var duplicateCount = 0;
+    var totalRows = 0;
 
     // 只认真正的作业行：学习通的作业 li 带 onclick="goTask(this)" 且 data 里有 workId/exam。
     // 不能退化成"所有 li"或"所有 a[href]"——侧边栏（进入空间/章节/资料/错题集）会被误判成作业。
@@ -613,7 +661,9 @@ class ScannerService {
       // 退化：只接受 data 指向作业/考试的 li，绝不吃侧边栏（/visit/…）菜单
       nodes = document.querySelectorAll('li[data]').where((node) {
         final data = (node.attributes['data'] ?? '').toLowerCase();
-        return data.contains('/work') || data.contains('workid') || data.contains('/exam');
+        return data.contains('/work') ||
+            data.contains('workid') ||
+            data.contains('/exam');
       }).toList();
     }
 
@@ -629,6 +679,9 @@ class ScannerService {
           !lowerUrl.contains('/exam')) {
         continue;
       }
+
+      // 能走到这里就算「页面上的一行作业」，无论最后是未交还是已交
+      totalRows++;
 
       final title = _readTaskTitle(node);
       final statusText = _readTaskStatus(node);
@@ -652,7 +705,8 @@ class ScannerService {
       final displayTitle = title.isEmpty ? kind.label : title;
       final taskKey = _extractTaskKey(url, node);
       final deadline = _tryParseDeadline(node.text);
-      final identity = taskKey ??
+      final identity =
+          taskKey ??
           'sig:${course.courseName}|$displayTitle|'
               '${deadline?.toIso8601String() ?? ''}';
       if (!seen.add(identity)) {
@@ -680,7 +734,11 @@ class ScannerService {
       );
     }
 
-    return items;
+    return TaskListSnapshot(
+      pending: items,
+      totalRows: totalRows,
+      skippedRows: skippedByStatus + duplicateCount,
+    );
   }
 
   /// 读取任务状态。不同皮肤分别放在 `.status.fl` / `.status` / `.zt` / `.state` 里。
@@ -739,7 +797,8 @@ class ScannerService {
     }
     if (weak != null) return weak;
 
-    final match = RegExp(r'/(?:work|exam)/(?:task|test)/(\d+)').firstMatch(uri.path);
+    final match = RegExp(r'/(?:work|exam)/(?:task|test)/(\d+)')
+        .firstMatch(uri.path);
     if (match != null) return 'pid:${match.group(1)}';
     return null;
   }
@@ -766,8 +825,18 @@ class ScannerService {
 
     // 行文本兜底：过滤掉类型徽标与状态词，取第一个像标题的片段
     const noise = <String>{
-      '作业', '考试', '任务', '待批阅', '未交', '已交', '已完成',
-      '待完成', '进行中', '未开始', '进行中（10）', '暂无',
+      '作业',
+      '考试',
+      '任务',
+      '待批阅',
+      '未交',
+      '已交',
+      '已完成',
+      '待完成',
+      '进行中',
+      '未开始',
+      '进行中（10）',
+      '暂无',
     };
 
     final parts = node.text

@@ -24,11 +24,19 @@ void main() {
     await tester.pump(); // 等本地缓存异步读取落定
   }
 
+  /// 看板顶部的流光一直在循环，pumpAndSettle 永远等不到静止；
+  /// 这里用固定帧数把弹层进出动画走完。
+  Future<void> settle(WidgetTester tester, [int frames = 8]) async {
+    for (var i = 0; i < frames; i++) {
+      await tester.pump(const Duration(milliseconds: 120));
+    }
+  }
+
   testWidgets('模型设置弹窗：动态列表、可编辑、保存后落库', (tester) async {
     await pumpDashboard(tester);
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     expect(find.text('模型设置'), findsOneWidget);
     expect(find.text('模型 1'), findsOneWidget);
@@ -44,7 +52,7 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     final models = AppConfig.getLlmModels();
     expect(models, hasLength(2));
@@ -59,14 +67,14 @@ void main() {
 
     // 重新打开：输入框应回显已保存的值
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
     final reopened = find.byType(TextField);
     expect(
       tester.widget<TextField>(reopened.at(3)).controller?.text,
       'sk-deepseek-test-123456',
     );
     await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    await settle(tester);
     expect(tester.takeException(), isNull);
   });
 
@@ -74,17 +82,17 @@ void main() {
     await pumpDashboard(tester);
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     await tester.tap(find.text('添加新模型'));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     expect(find.text('模型 3'), findsOneWidget);
     expect(find.byType(TextField), findsNWidgets(12));
 
     // 新卡片一个字都没填 → 保存时应被过滤掉
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await settle(tester);
     expect(AppConfig.getLlmModels(), hasLength(2));
     expect(tester.takeException(), isNull);
   });
@@ -93,11 +101,17 @@ void main() {
     await pumpDashboard(tester);
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     // 注意：要取 IconButton 本身才能读 onPressed，byIcon 拿到的是 Icon
-    final upButtons = find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded);
-    final downButtons = find.widgetWithIcon(IconButton, Icons.arrow_downward_rounded);
+    final upButtons = find.widgetWithIcon(
+      IconButton,
+      Icons.arrow_upward_rounded,
+    );
+    final downButtons = find.widgetWithIcon(
+      IconButton,
+      Icons.arrow_downward_rounded,
+    );
     expect(upButtons, findsNWidgets(2));
 
     // 边界控制：首项不能上移，末项不能下移（onPressed == null 即置灰禁用）
@@ -112,12 +126,12 @@ void main() {
 
     // 第二张（千问）上移 → 变成第一位
     await tester.tap(upButtons.at(1));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     expect(find.text('主模型-改名'), findsOneWidget, reason: '重排后已输入文字不能丢');
 
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     final models = AppConfig.getLlmModels();
     expect(models, hasLength(2));
@@ -130,14 +144,14 @@ void main() {
     await pumpDashboard(tester);
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     // 第一张卡片下移
     await tester.tap(find.byIcon(Icons.arrow_downward_rounded).first);
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     final models = AppConfig.getLlmModels();
     expect(models[0].name, '通义千问');
@@ -149,17 +163,17 @@ void main() {
     await pumpDashboard(tester);
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
-    await tester.pumpAndSettle();
+    await settle(tester);
     expect(find.text('模型 2'), findsOneWidget);
 
     // 删除第二张卡片
     await tester.tap(find.byIcon(Icons.delete_outline_rounded).at(1));
-    await tester.pumpAndSettle();
+    await settle(tester);
     expect(find.text('模型 2'), findsNothing);
     expect(find.byType(TextField), findsNWidgets(4));
 
     await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
+    await settle(tester);
     expect(AppConfig.getLlmModels(), hasLength(1));
     expect(AppConfig.getLlmModels().single.name, 'DeepSeek');
     expect(tester.takeException(), isNull);

@@ -279,7 +279,7 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
           curve: Curves.easeOut,
           height: _currentHeight,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(AppRadius.panel),
+            borderRadius: BorderRadius.circular(AppRadius.panelLarge),
             border: Border.all(
               color: busy ? AppColors.glow : AppColors.border,
               width: 1.5,
@@ -294,7 +294,7 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
           ),
           // 毛玻璃：先裁圆角，再模糊背后的网页
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(AppRadius.panel - 1.5),
+            borderRadius: BorderRadius.circular(AppRadius.panelLarge - 1.5),
             child: BackdropFilter(
               filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
               child: Container(
@@ -643,9 +643,8 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
         itemBuilder: (context, index) {
           final entry = widget.answers[index];
           final selected = entry.index == selectedIndex;
-          return GestureDetector(
+          return _PressableScale(
             key: ValueKey<String>('index-chip-${entry.index}'),
-            behavior: HitTestBehavior.opaque,
             onTap: () => setState(() {
               _selectedIndex = entry.index;
               _copiedIndex = null;
@@ -821,10 +820,10 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
   Widget _buildCopyCapsule(AnswerEntry entry) {
     final copied = _copiedIndex == entry.index;
 
-    return GestureDetector(
+    return _PressableScale(
       key: ValueKey<String>('copy-${entry.index}'),
-      behavior: HitTestBehavior.opaque,
       onTap: () => _copyEntry(entry),
+      scale: 0.95,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
         height: 32,
@@ -897,5 +896,50 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
           margin: EdgeInsets.fromLTRB(16, 8, 16, _currentHeight + 30),
         ),
       );
+  }
+}
+
+/// 按下时轻微缩小的点击反馈（题号胶囊 / 复制胶囊共用）。
+///
+/// 用 `AnimatedScale` 而不是改尺寸：不会触发重排，列表也不会抖。
+class _PressableScale extends StatefulWidget {
+  const _PressableScale({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.scale = 0.92,
+  });
+
+  final Widget child;
+  final VoidCallback? onTap;
+  final double scale;
+
+  @override
+  State<_PressableScale> createState() => _PressableScaleState();
+}
+
+class _PressableScaleState extends State<_PressableScale> {
+  bool _pressed = false;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _setPressed(true),
+      onTapUp: (_) => _setPressed(false),
+      onTapCancel: () => _setPressed(false),
+      onTap: widget.onTap,
+      child: AnimatedScale(
+        scale: _pressed ? widget.scale : 1,
+        duration: const Duration(milliseconds: 110),
+        curve: Curves.easeOut,
+        child: widget.child,
+      ),
+    );
   }
 }
