@@ -63,6 +63,13 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   /// 当前展示的参考答案（为空表示还没生成）
   List<AnswerEntry> _answers = const <AnswerEntry>[];
 
+  /// 这批答案是哪个地址出来的。换作业后旧答案必须失效，
+  /// 否则用户会对着上一份作业的答案抄。
+  String? _answersUrl;
+
+  /// 当前 WebView 地址（由加载回调维护，避免在同步代码里 await getUrl）
+  String? _currentPageUrl;
+
   /// 只读的页面状态指纹：表单控件数量 + 它们当前值的总长度 + HTML 总长度。
   ///
   /// **全程只读**（`input.value` 也只读取不赋值），
@@ -378,7 +385,20 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   }
 
   /// 题型的中文标签
-  String _answerTypeLabel(dynamic raw) {
+  String _answerTypeLabel(dynamic raw, {String stem = ''}) {
+    final label = _typeLabelOf(raw);
+    // 简答/翻译/作文在页面上常被标成 fill，光看类型会显示成「填空」，
+    // 容易让人以为只要有词组答案。看题干开头再细分一下。
+    if (label == '填空') {
+      final head = stem.length > 24 ? stem.substring(0, 24) : stem;
+      if (RegExp(r'简答|问答|翻译|写作|作文|论述|名词解释').hasMatch(head)) {
+        return '简答';
+      }
+    }
+    return label;
+  }
+
+  String _typeLabelOf(dynamic raw) {
     switch (_canonicalType(raw)) {
       case 'single':
         return '单选';
@@ -433,6 +453,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
           index: index,
           typeLabel: _answerTypeLabel(
             answer['type'] ?? questionByIndex[index]?['type'],
+            stem: (questionByIndex[index]?['stem'] ?? '').toString(),
           ),
           answer: text,
           stem: (questionByIndex[index]?['stem'] ?? '').toString(),
@@ -441,7 +462,19 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
 
     if (!mounted) return;
-    setState(() => _answers = entries);
+    setState(() {
+      _answers = entries;
+      _answersUrl = _currentPageUrl;
+    });
+  }
+
+  /// 换了页面（地址变了）就把上一份答案清掉。
+  /// 只是同页刷新时地址不变，答案保留，不会白跑一次 AI。
+  void _dropStaleAnswers(String? url) {
+    if (_answers.isEmpty) return;
+    if (url == null || url == _answersUrl) return;
+    _progressController.reset();
+    setState(() => _answers = const <AnswerEntry>[]);
   }
 
   /// 刷新缓存的「能否后退」状态
@@ -794,11 +827,14 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                       // 新页面：清掉上一页的 frame 快照，等这次上报
                       _frameHtmls.clear();
                       _frameTitles.clear();
+                      _currentPageUrl = url?.toString();
+                      _dropStaleAnswers(_currentPageUrl);
                       _log('页面加载完成，正在探测题目节点...');
                       _startDomProbeTimer();
                       _syncCanGoBack();
                     },
                     onUpdateVisitedHistory: (controller, url, isReload) {
+                      _currentPageUrl = url?.toString();
                       _syncCanGoBack();
                     },
                     onJsAlert: (controller, jsAlertRequest) async {

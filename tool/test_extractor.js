@@ -127,6 +127,118 @@ console.log('— 大题里选项重复 —');
   );
 }
 
+console.log('— 两道独立简答题（各自题干 + 独立编辑器）—');
+{
+  // 真实页面上「简答题（10分）」这类类型标签排在真题干前面，
+  // 旧逻辑取第一个命中的节点，两题拿到同一个题干后被当成重复合并，第二题丢失。
+  const html = `
+    <div class="TiMu">
+      <div class="mark_name">简答题（10分）</div>
+      <div class="Zy_TItle">第一题：请简述 TCP 三次握手的过程。</div>
+      <div class="questionLi">
+        <div class="mark_name">简答题（10分）</div>
+        <div class="edui-body">作答区</div>
+      </div>
+    </div>
+    <div class="TiMu">
+      <div class="mark_name">简答题（10分）</div>
+      <div class="Zy_TItle">第二题：请说明 HTTPS 的加密流程。</div>
+      <div class="questionLi">
+        <div class="mark_name">简答题（10分）</div>
+        <div class="edui-body">作答区</div>
+      </div>
+    </div>`;
+  const { payload } = run(html);
+  check('两道题都要保留', payload.totalCount, 2);
+  check('题干取真题干而不是类型标签', payload.questions.map((q) => q.stem), [
+    '第一题：请简述 TCP 三次握手的过程。',
+    '第二题：请说明 HTTPS 的加密流程。',
+  ]);
+  check('编号连续', payload.questions.map((q) => q.index), [1, 2]);
+}
+
+console.log('— 两道作文题（题干只有类型标签，正文在块内）—');
+{
+  const html = `
+    <div class="TiMu">
+      <div class="mark_name">作文题（20分）</div>
+      <div class="body">以 My Hometown 为题写一篇 120 词的作文。</div>
+      <div class="questionLi"><div class="mark_name">作文题（20分）</div></div>
+    </div>
+    <div class="TiMu">
+      <div class="mark_name">作文题（20分）</div>
+      <div class="body">以 My Dream 为题写一篇 120 词的作文。</div>
+      <div class="questionLi"><div class="mark_name">作文题（20分）</div></div>
+    </div>`;
+  const { payload } = run(html);
+  check('两道题都要保留', payload.totalCount, 2);
+  check(
+    '只有类型标签时用正文兜底，两题可区分',
+    payload.questions.map((q) => q.stem),
+    [
+      '以 My Hometown 为题写一篇 120 词的作文。',
+      '以 My Dream 为题写一篇 120 词的作文。',
+    ]
+  );
+}
+
+console.log('— 分组容器 + 两道子题 —');
+{
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">二、简答题</div>
+      <div class="questionLi">
+        <div class="Zy_TItle">（1）什么是三次握手？</div>
+        <textarea></textarea>
+      </div>
+      <div class="questionLi">
+        <div class="Zy_TItle">（2）四次挥手为什么要多一次？</div>
+        <textarea></textarea>
+      </div>
+    </div>`;
+  const { payload } = run(html);
+  check('容器本身不出题，子题各自成条', payload.totalCount, 2);
+  check('题干是子题自己的', payload.questions.map((q) => q.stem), [
+    '（1）什么是三次握手？',
+    '（2）四次挥手为什么要多一次？',
+  ]);
+}
+
+console.log('— 学习通真实结构：<div class="TiMu questionLi"> —');
+{
+  const html = `
+    <div class="TiMu questionLi">
+      <div class="Zy_TItle">1. 翻译：The quick brown fox jumps over the lazy dog.</div>
+      <div class="edui-body">作答区</div>
+    </div>
+    <div class="TiMu questionLi">
+      <div class="Zy_TItle">2. 翻译：Practice makes perfect.</div>
+      <div class="edui-body">作答区</div>
+    </div>`;
+  const { payload } = run(html);
+  check('同一元素双 class 不会被当成 4 条', payload.totalCount, 2);
+  check('两题题干各自独立', payload.questions.map((q) => q.stem), [
+    '1. 翻译：The quick brown fox jumps over the lazy dog.',
+    '2. 翻译：Practice makes perfect.',
+  ]);
+}
+
+console.log('— 嵌套 TiMu：分组标题里套两个独立大题 —');
+{
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">三、写作</div>
+      <div class="TiMu"><div class="Zy_TItle">（1）写一封求职信。</div><textarea></textarea></div>
+      <div class="TiMu"><div class="Zy_TItle">（2）写一份会议通知。</div><textarea></textarea></div>
+    </div>`;
+  const { payload } = run(html);
+  check('两个子大题都要出来', payload.totalCount, 2);
+  check('外层分组标题不单独成题', payload.questions.map((q) => q.stem), [
+    '（1）写一封求职信。',
+    '（2）写一份会议通知。',
+  ]);
+}
+
 console.log('— 只读性检查 —');
 {
   const html = `

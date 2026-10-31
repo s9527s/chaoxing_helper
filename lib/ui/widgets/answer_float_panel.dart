@@ -135,6 +135,10 @@ class _AnswerFloatPanelState extends State<AnswerFloatPanel> {
       _minimized = false;
       _height = null;
     }
+    // 清空答案（换作业了）时收回「待提取」高度
+    if (widget.answers.isEmpty && oldWidget.answers.isNotEmpty) {
+      _height = null;
+    }
   }
 
   /// 没有答案时只占三成屏幕（别压住作业列表），有答案时才铺开到四成半
