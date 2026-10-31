@@ -39,8 +39,9 @@ class _SplashGatePageState extends State<SplashGatePage> {
 
     bool valid = false;
     try {
+      // 纯本地判断（只查 Cookie 字段），启动阶段绝不联网。
       valid = await CookieSyncHelper.instance
-          .hasValidSession()
+          .hasLocalSession()
           .timeout(_sessionCheckTimeout, onTimeout: () => false);
     } catch (e) {
       debugPrint('[SplashGate] 登录态校验失败，降级到登录页: $e');

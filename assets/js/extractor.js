@@ -122,7 +122,8 @@
             'script, style, .Zy_ulTop, .mark_name, .answerSheet, .bottomList'
         );
         for (var i = 0; i < drop.length; i++) {
-            if (drop[i].parentNode) drop[i].parentNode.removeChild(drop[i]);
+            // 只删 clone 副本里的节点，真实页面不受影响
+            if (drop[i].parentNode) drop[i].parentNode.removeChild(drop[i]); // readonly-audit-ok: clone 副本
         }
         var text = textOf(clone);
         // 去掉残留的类型标签前缀，如「简答题（10分）」

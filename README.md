@@ -67,6 +67,25 @@
 它的边界是刻意收紧的：**只由用户点击触发**（进程里没有任何定时器 / 后台轮询）、
 **只请求看板里那几门课**（不做全量课程遍历、不猜 URL）、并发上限 3、**只 GET 不提交**。
 
+**启动阶段不联网**
+
+冷启动只做**本地**判断（Cookie 里 `uid` / `_d` / `vc3` 是否齐全），不发任何请求。
+登录态真失效时：点刷新会收到「登录态已失效，请重新登录」，打开课程页也会被跳转到登录页，
+两条路径都能兜住，因此不需要在启动时先向服务器探一次。
+
+**三条红线的自动化守卫**
+
+`test/readonly_guard_test.dart` 扫描源码本身，把红线和测试绑在一起：
+
+| 守卫 | 判定 |
+| --- | --- |
+| 绝对只读 | `lib/` 与 `assets/` 里出现 `click` / `dispatchEvent` / `innerHTML=` / `value=` / `setAttribute` / `appendChild` 等 DOM 写操作 → 测试失败 |
+| 无静默请求 | `core/network` 与 `data/services` 里出现 `Timer` / `Future.delayed` → 测试失败；启动页出现 `DioClient` → 测试失败 |
+| 无内置凭据 | 源码里出现 `sk-` 开头的长串密钥、仓库里出现 `key.properties` / `.jks` → 测试失败 |
+
+唯一豁免是 `extractor.js` 里对 **clone 副本** 的 `removeChild`（真实页面不受影响），
+该行带 `readonly-audit-ok` 标记，且全仓库只允许存在 1 处。
+
 **已知限制**
 
 - 题目提取只读**顶层文档**，题目在 iframe 内的页面会提取不到（这是刻意做的简化）

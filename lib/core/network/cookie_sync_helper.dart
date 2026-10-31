@@ -1,4 +1,3 @@
-import 'package:dio/dio.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -8,7 +7,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 1. 从 WebView 的 CookieManager 中聚合 .chaoxing.com 各子域 Cookie，去重拼接为
 ///    `k1=v1; k2=v2` 形式的请求头字符串；
 /// 2. 持久化到 SharedPreferences，供 Dio 复用；
-/// 3. 通过一次个人空间请求校验登录态是否仍然有效。
+/// 3. **纯本地**校验登录态（只看 Cookie 字段是否齐全）。
+///
+/// 为什么启动时不再向服务器发一次「在不在线」的探查请求：
+/// 本项目的红线是**任何对学习通的请求都必须由用户手动点击触发**。
+/// 启动即联网会破坏这条边界（也会让冷启动依赖网络）。
+/// 登录态真失效时，用户点刷新会收到「登录态已失效，请重新登录」，
+/// 打开课程页也会被跳转到登录页——两条路径都能兜住，无需启动时预探。
 class CookieSyncHelper {
   CookieSyncHelper._();
 
@@ -21,9 +26,6 @@ class CookieSyncHelper {
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   static const String moocReferer = 'https://mooc1.chaoxing.com/';
-
-  /// 个人空间首页：未登录会 302 或返回跳登录的落地页，用来验证会话。
-  static const String _sessionProbeUrl = 'https://i.chaoxing.com/base';
 
   /// 需要聚合 Cookie 的域（按顺序覆盖，后者同名字段优先）。
   static const List<String> _cookieSourceHosts = <String>[
@@ -124,70 +126,15 @@ class CookieSyncHelper {
     return true;
   }
 
-  /// 是否处于有效登录态。
+  /// 本地是否处于「看起来已登录」的状态。
   ///
-  /// 1. 本地 Cookie 必须包含 UID / _d / vc3；
-  /// 2. 用 Dio 访问一次个人空间，若被 302 重定向到 passport 登录页则视为失效。
-  Future<bool> hasValidSession() async {
-    final header = await getCookieHeader(forceReload: true);
-    if (header.isEmpty) return false;
-
-    final jar = _parseCookieHeader(header);
-    for (final key in _requiredCookieKeys) {
-      final value = jar[key];
-      if (value == null || value.isEmpty) return false;
-    }
-
-    return _verifyWithServer(header);
-  }
-
-  /// 请求个人空间，判断是否被重定向到登录页。
-  Future<bool> _verifyWithServer(String cookieHeader) async {
-    final dio = Dio(
-      BaseOptions(
-        connectTimeout: const Duration(seconds: 12),
-        receiveTimeout: const Duration(seconds: 15),
-        followRedirects: false,
-        validateStatus: (status) => status != null && status < 500,
-        headers: <String, dynamic>{
-          'Cookie': cookieHeader,
-          'Referer': moocReferer,
-          'User-Agent': desktopUserAgent,
-          'Accept':
-              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-      ),
-    );
-
-    try {
-      final response = await dio.get<String>(
-        _sessionProbeUrl,
-        options: Options(responseType: ResponseType.plain),
-      );
-
-      final status = response.statusCode ?? 0;
-
-      // 302 / 303 / 307：跟随 Location 判断是否被踢回登录页
-      if (status >= 300 && status < 400) {
-        final location = (response.headers.value('location') ?? '').toLowerCase();
-        final redirectedToLogin =
-            location.contains('passport') || location.contains('login');
-        return !redirectedToLogin;
-      }
-
-      if (status != 200) return false;
-
-      // 部分场景返回 200，但正文就是登录落地页
-      final body = (response.data ?? '').toLowerCase();
-      if (body.contains('passport2.chaoxing.com/login')) return false;
-      if (body.contains('用户登录') && body.contains('passport')) return false;
-
-      return true;
-    } catch (_) {
-      // 网络异常时不武断判定为已登录，交由上层引导重新登录
-      return false;
-    }
-  }
+  /// **纯本地判断，不发任何网络请求**：只检查 Cookie 里 UID / _d / vc3
+  /// 三个关键字段是否齐全。
+  ///
+  /// 真实有效性交给两条用户主动触发的路径去发现：
+  ///  - 点「刷新」时页面被踢回登录页 → 报「登录态已失效，请重新登录」；
+  ///  - 打开课程/作业页时被跳转到登录页 → 走登录流程重新同步 Cookie。
+  Future<bool> hasLocalSession() => hasRequiredAuthFields();
 
   /// 解析 `k1=v1; k2=v2`，返回小写 key 的映射（Cookie 名大小写敏感但校验不敏感）。
   Map<String, String> _parseCookieHeader(String header) {
