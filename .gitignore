@@ -60,3 +60,6 @@ key.properties
 
 # Android 构建产物
 /android/build/
+
+# git 内部临时目录（filter-branch 运行时会生成，绝不入库）
+/.git-rewrite/
