@@ -9,6 +9,7 @@ import '../../core/config/app_config.dart';
 import '../../data/services/ai_solver_service.dart';
 import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/answer_float_panel.dart';
 
 class WorkWebViewPage extends StatefulWidget {
@@ -26,10 +27,16 @@ class WorkWebViewPage extends StatefulWidget {
 }
 
 class _WorkWebViewPageState extends State<WorkWebViewPage> {
-  static const String _desktopUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  static const String _desktopUA =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   /// 默认参与自动作答的题型：单选 / 多选 / 判断 / 填空
-  static const List<String> _defaultEnabledTypes = <String>['single', 'multiple', 'judge', 'fill'];
+  static const List<String> _defaultEnabledTypes = <String>[
+    'single',
+    'multiple',
+    'judge',
+    'fill',
+  ];
 
   /// 题型别名 → 标准 key，兼容 extractor 输出中文或英文
   static const Map<String, String> _typeAliases = <String, String>{
@@ -56,7 +63,8 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
   InAppWebViewController? _webViewController;
   Timer? _domProbeTimer;
-  final SolvingProgressController _progressController = SolvingProgressController();
+  final SolvingProgressController _progressController =
+      SolvingProgressController();
   final AiSolverService _aiSolverService = AiSolverService();
   bool _isDomReady = false;
 
@@ -172,9 +180,18 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   void _startDomProbeTimer() {
     _domProbeTimer?.cancel();
     int attempts = 0;
-    _domProbeTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) async {
-      if (!mounted || _webViewController == null) { timer.cancel(); return; }
-      if (attempts++ > 40) { timer.cancel(); _log('⚠️ 页面探测超时，未检测到题目节点'); return; }
+    _domProbeTimer = Timer.periodic(const Duration(milliseconds: 500), (
+      timer,
+    ) async {
+      if (!mounted || _webViewController == null) {
+        timer.cancel();
+        return;
+      }
+      if (attempts++ > 40) {
+        timer.cancel();
+        _log('⚠️ 页面探测超时，未检测到题目节点');
+        return;
+      }
 
       const String probeJs = """
         (function() {
@@ -191,7 +208,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
       """;
 
       try {
-        final result = await _webViewController!.evaluateJavascript(source: probeJs);
+        final result = await _webViewController!.evaluateJavascript(
+          source: probeJs,
+        );
         if (result == true || result.toString() == 'true') {
           timer.cancel();
           if (!mounted) return;
@@ -206,12 +225,16 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
   void _handleQuestionsExtracted(List<dynamic> args) {
     if (args.isEmpty || args.first == null) return;
-    final Map<String, dynamic> payload = args.first is String ? Map<String, dynamic>.from(jsonDecode(args.first as String)) : Map<String, dynamic>.from(args.first as Map);
+    final Map<String, dynamic> payload = args.first is String
+        ? Map<String, dynamic>.from(jsonDecode(args.first as String))
+        : Map<String, dynamic>.from(args.first as Map);
 
     final int total = (payload['totalCount'] as num?)?.toInt() ?? 0;
     final int solvable = (payload['solvableCount'] as num?)?.toInt() ?? 0;
     final int collapsed = (payload['collapsedCount'] as num?)?.toInt() ?? 0;
-    _cachedQuestions = List<Map<String, dynamic>>.from(payload['questions'] as List? ?? []);
+    _cachedQuestions = List<Map<String, dynamic>>.from(
+      payload['questions'] as List? ?? [],
+    );
 
     if (collapsed > 0) {
       _log('去重：折叠了 $collapsed 个子块，同一大题的多个空只算一题');
@@ -249,7 +272,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   void _fail(String message) => _progressController.setError(message);
 
   Future<String> _getCookieHeader() async {
-    final cookies = await CookieManager.instance().getCookies(url: WebUri(widget.workUrl));
+    final cookies = await CookieManager.instance().getCookies(
+      url: WebUri(widget.workUrl),
+    );
     return cookies.map((c) => '${c.name}=${c.value}').join('; ');
   }
 
@@ -260,7 +285,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   }
 
   /// 过滤出参与自动作答的题目，并把 type 统一成标准 key
-  List<Map<String, dynamic>> _filterQuestionsByTypes(List<String> enabledTypes) {
+  List<Map<String, dynamic>> _filterQuestionsByTypes(
+    List<String> enabledTypes,
+  ) {
     final allowed = enabledTypes.map(_canonicalType).toSet();
     final filtered = <Map<String, dynamic>>[];
 
@@ -299,8 +326,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         logMessage: '正在读取页面题目（仅文字）...',
       );
       _extractCompleter = Completer<Map<String, dynamic>>();
-      await _webViewController!
-          .injectJavascriptFileFromAsset(assetFilePath: 'assets/js/extractor.js');
+      await _webViewController!.injectJavascriptFileFromAsset(
+        assetFilePath: 'assets/js/extractor.js',
+      );
       await _extractCompleter!.future.timeout(const Duration(seconds: 10));
 
       if (_cachedQuestions.isEmpty) throw Exception('未提取到任何题目');
@@ -512,7 +540,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
       final courseName = _guessCourseName();
 
       for (final html in _frameHtmls.values) {
-        final parsed = ScannerService.instance.parseTasksFromHtml(html, courseName: courseName);
+        final parsed = ScannerService.instance.parseTasksFromHtml(
+          html,
+          courseName: courseName,
+        );
         for (final item in parsed) {
           if (seenUrls.add(item.url)) items.add(item);
         }
@@ -521,19 +552,25 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
       // ---------- 方案 2：都没有就抓当前帧 ----------
       if (items.isEmpty) {
-        final CallAsyncJavaScriptResult? dumpResult = await controller.callAsyncJavaScript(
-          functionBody: r"""
+        final CallAsyncJavaScriptResult? dumpResult = await controller
+            .callAsyncJavaScript(
+              functionBody: r"""
             var html = document.documentElement ? document.documentElement.outerHTML : '';
             return JSON.stringify({ href: location.href, html: html });
           """,
-        );
+            );
 
         final dynamic raw = dumpResult?.value;
         if (raw != null) {
-          final payload = Map<String, dynamic>.from(jsonDecode(raw.toString()) as Map);
+          final payload = Map<String, dynamic>.from(
+            jsonDecode(raw.toString()) as Map,
+          );
           final html = (payload['html'] ?? '').toString();
           if (html.isNotEmpty) {
-            final parsed = ScannerService.instance.parseTasksFromHtml(html, courseName: courseName);
+            final parsed = ScannerService.instance.parseTasksFromHtml(
+              html,
+              courseName: courseName,
+            );
             for (final item in parsed) {
               if (seenUrls.add(item.url)) items.add(item);
             }
@@ -563,7 +600,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   /// 推断课程名：先从各 frame 的 HTML 里找课程名节点，再退化到 document.title
   String _guessCourseName() {
     final patterns = <RegExp>[
-      RegExp(r'class="[^"]*course-?name[^"]*"[^>]*>\s*([^<]{2,40})<', caseSensitive: false),
+      RegExp(
+        r'class="[^"]*course-?name[^"]*"[^>]*>\s*([^<]{2,40})<',
+        caseSensitive: false,
+      ),
       RegExp(r'id="courseName"[^>]*>\s*([^<]{2,40})<', caseSensitive: false),
     ];
 
@@ -576,8 +616,19 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
 
     const generic = <String>{
-      '作业', '任务', '考试', '学习通', '超星学习通', '我的课程', '课程',
-      '章节', '资料', '讨论', '任务列表', '作业列表', '考试列表',
+      '作业',
+      '任务',
+      '考试',
+      '学习通',
+      '超星学习通',
+      '我的课程',
+      '课程',
+      '章节',
+      '资料',
+      '讨论',
+      '任务列表',
+      '作业列表',
+      '考试列表',
     };
 
     // 各 frame 的 title 里，课程名通常最长（"英语四六级刷题冲刺" > "任务列表"）
@@ -612,9 +663,23 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
   /// 课程名黑名单：这些是页面标题/通用文案，不是课程名
   static const Set<String> _genericNames = <String>{
-    '作业', '任务', '考试', '学习通', '超星学习通', '我的课程', '课程',
-    '章节', '资料', '讨论', '任务列表', '作业列表', '考试列表', '收件箱',
-    '首页', '互动', '待办',
+    '作业',
+    '任务',
+    '考试',
+    '学习通',
+    '超星学习通',
+    '我的课程',
+    '课程',
+    '章节',
+    '资料',
+    '讨论',
+    '任务列表',
+    '作业列表',
+    '考试列表',
+    '收件箱',
+    '首页',
+    '互动',
+    '待办',
   };
 
   /// 去掉页面标题里的噪音，留下像课程名的那部分
@@ -732,8 +797,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     Set<String> seen,
   ) {
     if (html.isEmpty) return;
-    for (final course
-        in ScannerService.instance.parseCourseListHtml(html)) {
+    for (final course in ScannerService.instance.parseCourseListHtml(html)) {
       if (!seen.add(course.key)) continue;
       collected.add(course);
     }
@@ -774,32 +838,84 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     );
   }
 
+  /// AppBar 上的胶囊按钮（带文字的图标按钮）
+  Widget _buildAppBarCapsule({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+    bool filled = false,
+  }) {
+    final bg = filled ? AppColors.primary : AppColors.primaryContainer;
+    final fg = filled ? Colors.white : AppColors.primary;
+
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 32,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 15, color: fg),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: fg,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildScaffold() {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: AppColors.surface,
       appBar: AppBar(
-        title: Text(widget.workTitle),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
-        elevation: 0.5,
+        title: const Text('作业详情'),
+        backgroundColor: AppColors.surface,
+        foregroundColor: AppColors.ink,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
         // 返回按钮与系统返回键走同一套逻辑
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(Icons.arrow_back_rounded),
           tooltip: '返回',
           onPressed: _handleBack,
         ),
         actions: <Widget>[
-          IconButton(
-            icon: const Icon(Icons.menu_book_outlined),
-            tooltip: '保存全部课程（只读当前页）',
-            onPressed: _importCoursesFromCurrentPage,
+          _buildAppBarCapsule(
+            label: '保存全部',
+            icon: Icons.bookmark_add_outlined,
+            onTap: _importCoursesFromCurrentPage,
           ),
-          IconButton(
-            icon: const Icon(Icons.playlist_add_check),
-            tooltip: '提取本页作业',
-            onPressed: _extractTasksFromCurrentPage,
+          const SizedBox(width: 8),
+          _buildAppBarCapsule(
+            label: '提取作业',
+            icon: Icons.playlist_add_check_rounded,
+            onTap: _extractTasksFromCurrentPage,
+            filled: true,
           ),
+          const SizedBox(width: 12),
         ],
+        bottom: const PreferredSize(
+          preferredSize: Size.fromHeight(1),
+          child: SizedBox(
+            height: 1,
+            width: double.infinity,
+            child: ColoredBox(color: AppColors.border),
+          ),
+        ),
       ),
       // WebView 与悬浮面板平铺叠放：面板只是浮在上面的一层，
       // 不像模态弹窗那样接管整屏，网页本身随时可以点、可以输入。
@@ -807,41 +923,50 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         children: <Widget>[
           Positioned.fill(
             child: InAppWebView(
-                    initialUrlRequest: URLRequest(url: WebUri(widget.workUrl)),
-                    // 唯一的注入脚本：只读上报 frame HTML（用于导入作业列表）
-                    initialUserScripts: _buildInitialUserScripts(),
-                    initialSettings: InAppWebViewSettings(
-                      javaScriptEnabled: true,
-                      domStorageEnabled: true,
-                      userAgent: _desktopUA,
-                      mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
-                      useWideViewPort: true,
-                      loadWithOverviewMode: true,
-                    ),
-                    onWebViewCreated: (controller) {
-                      _webViewController = controller;
-                      controller.addJavaScriptHandler(handlerName: 'onQuestionsExtracted', callback: _handleQuestionsExtracted);
-                      controller.addJavaScriptHandler(handlerName: 'onFrameHtml', callback: _handleFrameHtml);
-                    },
-                    onLoadStop: (controller, url) async {
-                      // 新页面：清掉上一页的 frame 快照，等这次上报
-                      _frameHtmls.clear();
-                      _frameTitles.clear();
-                      _currentPageUrl = url?.toString();
-                      _dropStaleAnswers(_currentPageUrl);
-                      _log('页面加载完成，正在探测题目节点...');
-                      _startDomProbeTimer();
-                      _syncCanGoBack();
-                    },
-                    onUpdateVisitedHistory: (controller, url, isReload) {
-                      _currentPageUrl = url?.toString();
-                      _syncCanGoBack();
-                    },
-                    onJsAlert: (controller, jsAlertRequest) async {
-                      _log('拦截弹窗: ${jsAlertRequest.message}');
-                      return JsAlertResponse(handledByClient: true, action: JsAlertResponseAction.CONFIRM);
-                    },
-                  ),
+              initialUrlRequest: URLRequest(url: WebUri(widget.workUrl)),
+              // 唯一的注入脚本：只读上报 frame HTML（用于导入作业列表）
+              initialUserScripts: _buildInitialUserScripts(),
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                domStorageEnabled: true,
+                userAgent: _desktopUA,
+                mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+                useWideViewPort: true,
+                loadWithOverviewMode: true,
+              ),
+              onWebViewCreated: (controller) {
+                _webViewController = controller;
+                controller.addJavaScriptHandler(
+                  handlerName: 'onQuestionsExtracted',
+                  callback: _handleQuestionsExtracted,
+                );
+                controller.addJavaScriptHandler(
+                  handlerName: 'onFrameHtml',
+                  callback: _handleFrameHtml,
+                );
+              },
+              onLoadStop: (controller, url) async {
+                // 新页面：清掉上一页的 frame 快照，等这次上报
+                _frameHtmls.clear();
+                _frameTitles.clear();
+                _currentPageUrl = url?.toString();
+                _dropStaleAnswers(_currentPageUrl);
+                _log('页面加载完成，正在探测题目节点...');
+                _startDomProbeTimer();
+                _syncCanGoBack();
+              },
+              onUpdateVisitedHistory: (controller, url, isReload) {
+                _currentPageUrl = url?.toString();
+                _syncCanGoBack();
+              },
+              onJsAlert: (controller, jsAlertRequest) async {
+                _log('拦截弹窗: ${jsAlertRequest.message}');
+                return JsAlertResponse(
+                  handledByClient: true,
+                  action: JsAlertResponseAction.CONFIRM,
+                );
+              },
+            ),
           ),
           // 可拖拽 / 可最小化 / 支持一键复制的悬浮面板
           Positioned.fill(

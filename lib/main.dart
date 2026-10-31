@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'core/config/app_config.dart';
 import 'ui/pages/splash_gate_page.dart';
+import 'ui/theme/app_theme.dart';
 
 /// 全局 Navigator Key：便于在非 Widget 上下文（如拦截器、定时任务）中跳转。
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
@@ -30,10 +31,7 @@ class MyApp extends StatelessWidget {
       title: '学习通助手',
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: buildAppTheme(),
       home: const SplashGatePage(),
     );
   }

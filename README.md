@@ -17,9 +17,12 @@
   （靠真题干 + 父子关系判断，不会把「简答题（10分）」这种类型标签当成题干）
 - 把文字发给用户自己配置的 OpenAI 兼容模型（DeepSeek / Kimi / 豆包 / 任意中转站）
 - 以**非模态悬浮面板**展示参考答案，供用户**自己对照页面手动作答**
-  面板可拖拽调高度、可最小化成小球、答案可一键复制；
-  顶部是**题号按钮栏**（`[1] [2] [3] …`，Wrap 自动换行），点哪个题号，
+  毛玻璃面板可拖拽调高度、可最小化成小球、答案可一键复制；
+  顶部是**横向滚动的题号胶囊**（`[1] [2] [3] …`），点哪个题号，
   下方的卡片就只显示那一题的答案（带复制），像遥控器一样逐题对照
+- 运行日志默认收在标题栏的**状态胶囊**里（绿点「已就绪」/ 转圈「分析中」），点一下才展开
+- 界面统一走 Material 3 设计 token（`ui/theme/app_theme.dart`）：`#4F46E5` 主色、
+  `#F8FAFC` 页面底色、16 圆角细边框卡片、无阴影
 - 从作业列表页导入作业条目，在本地做一个待办看板
   （**只统计「未交/待交」**；每次提取成功都用网页最新结果**整批覆盖**该课程的旧缓存，
   不与旧状态合并，避免脏数据越堆越多）
@@ -118,6 +121,7 @@ lib/
   data/services/scanner_service.dart     HTML 解析（作业 / 课程列表）
   data/services/task_store.dart          作业列表本地缓存
   data/services/course_store.dart        课程快捷入口本地缓存
+  ui/theme/app_theme.dart                全局设计 token（配色 / 圆角 / ThemeData）
   ui/pages/dashboard_page.dart           看板 + 课程入口 + 模型设置
   ui/pages/work_webview_page.dart        WebView 阅读页 + 悬浮面板 + 课程导入
   ui/widgets/answer_float_panel.dart     可拖拽/最小化/一键复制的悬浮答案面板

@@ -96,8 +96,8 @@ void main() {
     await tester.pumpAndSettle();
 
     // 注意：要取 IconButton 本身才能读 onPressed，byIcon 拿到的是 Icon
-    final upButtons = find.widgetWithIcon(IconButton, Icons.arrow_upward);
-    final downButtons = find.widgetWithIcon(IconButton, Icons.arrow_downward);
+    final upButtons = find.widgetWithIcon(IconButton, Icons.arrow_upward_rounded);
+    final downButtons = find.widgetWithIcon(IconButton, Icons.arrow_downward_rounded);
     expect(upButtons, findsNWidgets(2));
 
     // 边界控制：首项不能上移，末项不能下移（onPressed == null 即置灰禁用）
@@ -133,7 +133,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 第一张卡片下移
-    await tester.tap(find.byIcon(Icons.arrow_downward).first);
+    await tester.tap(find.byIcon(Icons.arrow_downward_rounded).first);
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('保存'));
@@ -153,7 +153,7 @@ void main() {
     expect(find.text('模型 2'), findsOneWidget);
 
     // 删除第二张卡片
-    await tester.tap(find.byIcon(Icons.delete_outline).at(1));
+    await tester.tap(find.byIcon(Icons.delete_outline_rounded).at(1));
     await tester.pumpAndSettle();
     expect(find.text('模型 2'), findsNothing);
     expect(find.byType(TextField), findsNWidgets(4));

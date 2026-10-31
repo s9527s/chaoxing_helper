@@ -10,6 +10,7 @@ import '../../data/services/scanner_service.dart';
 import '../../data/services/task_store.dart';
 import 'login_page.dart';
 import 'work_webview_page.dart';
+import '../theme/app_theme.dart';
 
 // ============================================================
 // 数据模型
@@ -134,15 +135,11 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  // ---- 视觉常量 ----
-  static const Color _urgentColor = Color(0xFFE53935);
-  static const Color _safeColor = Color(0xFF2E7D32);
-  static const Color _expiredColor = Color(0xFF9E9E9E);
-  static const Color _soonColor = Color(0xFFEF6C00);
-  static const Color _riskColor = Color(0xFFB26A00);
-  static const Color _riskBg = Color(0xFFFFF4E0);
-  static const Color _safeBg = Color(0xFFE8F5E9);
-  static const Color _pageBg = Color(0xFFF6F7F9);
+  // ---- 视觉常量（全部取自全局设计 token） ----
+  static const Color _riskColor = Color(0xFFB45309);
+  static const Color _riskBg = Color(0xFFFEF3C7);
+  static const Color _safeBg = AppColors.primaryContainer;
+  static const Color _pageBg = AppColors.bg;
 
   DashboardView _view = DashboardView.byCourse;
   SortMode _sortMode = SortMode.deadline;
@@ -291,7 +288,9 @@ class _DashboardPageState extends State<DashboardPage> {
   TaskType _inferType(HomeworkItem item) {
     final title = item.title;
 
-    if (title.contains('实验') && title.contains('论文')) return TaskType.experiment;
+    if (title.contains('实验') && title.contains('论文')) {
+      return TaskType.experiment;
+    }
     if (title.contains('论文')) return TaskType.paper;
     if (title.contains('视频') || title.contains('实践')) return TaskType.video;
     if (title.contains('考试') || title.contains('测验') || title.contains('测试')) {
@@ -306,15 +305,15 @@ class _DashboardPageState extends State<DashboardPage> {
   /// 按作业视图用的扁平列表：紧急的在前
   /// HomeworkItem → CourseTask
   CourseTask _toTask(HomeworkItem item) => CourseTask(
-        title: item.title,
-        courseName: item.courseName,
-        type: _inferType(item),
-        deadline: item.deadline ?? DateTime.now().add(const Duration(days: 30)),
-        url: item.url,
-        deadlineUnknown: item.deadline == null,
-        identity: item.identity,
-        status: item.status,
-      );
+    title: item.title,
+    courseName: item.courseName,
+    type: _inferType(item),
+    deadline: item.deadline ?? DateTime.now().add(const Duration(days: 30)),
+    url: item.url,
+    deadlineUnknown: item.deadline == null,
+    identity: item.identity,
+    status: item.status,
+  );
 
   /// 按课程分组（保持首次出现顺序）
   List<CourseGroup> _groupByCourse(List<HomeworkItem> items) {
@@ -390,14 +389,6 @@ class _DashboardPageState extends State<DashboardPage> {
       .where((t) => t.isPending && t.highRisk)
       .length;
 
-  String get _keyStatusText {
-    final models = AppConfig.getLlmModels();
-    if (models.isEmpty) return '模型：未配置（点右上角设置添加）';
-    final usable = models.where((m) => m.hasKey).length;
-    final names = models.map((m) => m.label).join(' / ');
-    return '模型 $usable/${models.length}：$names';
-  }
-
   // ---------------- 状态颜色 / 文案 ----------------
 
   /// 紧急程度（以当前时间计算，随 ticker 每秒变化）
@@ -408,19 +399,6 @@ class _DashboardPageState extends State<DashboardPage> {
     if (diff.inHours < 24) return _Urgency.urgent;
     if (diff.inHours < 72) return _Urgency.soon;
     return _Urgency.normal;
-  }
-
-  Color _urgencyColor(CourseTask task, DateTime now) {
-    switch (_urgency(task, now)) {
-      case _Urgency.expired:
-        return _expiredColor;
-      case _Urgency.urgent:
-        return _urgentColor;
-      case _Urgency.soon:
-        return _soonColor;
-      case _Urgency.normal:
-        return _safeColor;
-    }
   }
 
   /// ⏳ 剩 2天14小时 / 🔥 剩 3小时12分 / 已过期
@@ -456,10 +434,8 @@ class _DashboardPageState extends State<DashboardPage> {
     }
     final imported = await Navigator.of(context).push<List<HomeworkItem>>(
       MaterialPageRoute<List<HomeworkItem>>(
-        builder: (_) => WorkWebViewPage(
-          workTitle: task.title,
-          workUrl: task.url,
-        ),
+        builder: (_) =>
+            WorkWebViewPage(workTitle: task.title, workUrl: task.url),
       ),
     );
     _handleImported(imported);
@@ -518,7 +494,9 @@ class _DashboardPageState extends State<DashboardPage> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+            ),
             onPressed: () {
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop(true);
@@ -593,7 +571,10 @@ class _DashboardPageState extends State<DashboardPage> {
       return;
     }
     try {
-      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
       if (!launched) _toast('未找到可打开该链接的浏览器');
     } catch (e) {
       _toast('打开外部浏览器失败：$e');
@@ -612,10 +593,12 @@ class _DashboardPageState extends State<DashboardPage> {
 
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: AppColors.surface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(AppRadius.panel),
+        ),
       ),
       builder: (sheetContext) => SafeArea(
         top: false,
@@ -630,7 +613,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   width: 40,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.12),
+                    color: const Color(0xFFCBD5E1),
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
@@ -641,12 +624,19 @@ class _DashboardPageState extends State<DashboardPage> {
                   Expanded(
                     child: Text(
                       course.name,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.ink,
+                      ),
                     ),
                   ),
                   Text(
                     '${course.taskCount} 份待办',
-                    style: TextStyle(fontSize: 12.5, color: Colors.black.withValues(alpha: 0.45)),
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      color: AppColors.secondary,
+                    ),
                   ),
                   const SizedBox(width: 4),
                   IconButton(
@@ -654,14 +644,18 @@ class _DashboardPageState extends State<DashboardPage> {
                       if (!sheetContext.mounted) return;
                       Navigator.of(sheetContext).pop();
                     },
-                    icon: const Icon(Icons.close, size: 20),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      size: 20,
+                      color: AppColors.secondary,
+                    ),
                     tooltip: '关闭',
                   ),
                 ],
               ),
-              Text(
+              const Text(
                 '按截止时间倒序排列',
-                style: TextStyle(fontSize: 11.5, color: Colors.black.withValues(alpha: 0.38)),
+                style: TextStyle(fontSize: 11.5, color: AppColors.muted),
               ),
               const SizedBox(height: 6),
               Flexible(
@@ -669,8 +663,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   shrinkWrap: true,
                   padding: const EdgeInsets.only(top: 4),
                   itemCount: sorted.length,
-                  separatorBuilder: (context, index) => const SizedBox(height: 10),
-                  itemBuilder: (_, index) => _buildTaskTile(sorted[index], DateTime.now()),
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(height: 10),
+                  itemBuilder: (_, index) =>
+                      _buildTaskTile(sorted[index], DateTime.now()),
                 ),
               ),
             ],
@@ -698,109 +694,189 @@ class _DashboardPageState extends State<DashboardPage> {
       drafts.add(_ModelDraft.empty(nextDraftId++));
     }
 
-    final saved = await showDialog<bool>(
+    final saved = await showModalBottomSheet<bool>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('模型设置'),
-          content: SizedBox(
-            width: 460,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                Flexible(
-                  child: drafts.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 24),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: const Color(0x660F172A),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final maxHeight = MediaQuery.sizeOf(context).height * 0.85;
+          return Container(
+            constraints: BoxConstraints(maxHeight: maxHeight),
+            decoration: const BoxDecoration(
+              color: AppColors.bg,
+              borderRadius: BorderRadius.vertical(
+                top: Radius.circular(AppRadius.panel),
+              ),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFCBD5E1),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 8, 2),
+                    child: Row(
+                      children: <Widget>[
+                        const Icon(
+                          Icons.tune_rounded,
+                          size: 18,
+                          color: AppColors.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
                           child: Text(
-                            '还没有任何模型，点下面按钮添加一个',
-                            textAlign: TextAlign.center,
+                            '模型设置',
                             style: TextStyle(
-                              fontSize: 12.5,
-                              color: Colors.black.withValues(alpha: 0.45),
-                            ),
-                          ),
-                        )
-                      : ListView.separated(
-                          shrinkWrap: true,
-                          itemCount: drafts.length,
-                          separatorBuilder: (context, index) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (context, index) => _buildModelCard(
-                            draft: drafts[index],
-                            index: index,
-                            // 首项禁用上移、末项禁用下移（onPressed 为 null 时自动置灰）
-                            onMoveUp: index == 0
-                                ? null
-                                : () => setDialogState(() {
-                                      final moved = drafts.removeAt(index);
-                                      drafts.insert(index - 1, moved);
-                                    }),
-                            onMoveDown: index == drafts.length - 1
-                                ? null
-                                : () => setDialogState(() {
-                                      final moved = drafts.removeAt(index);
-                                      drafts.insert(index + 1, moved);
-                                    }),
-                            onDelete: () =>
-                                setDialogState(() => drafts.removeAt(index)),
-                            onToggleObscure: () => setDialogState(
-                              () => drafts[index].obscureKey = !drafts[index].obscureKey,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                              color: AppColors.ink,
                             ),
                           ),
                         ),
-                ),
-                const SizedBox(height: 10),
-                OutlinedButton.icon(
-                  onPressed: () => setDialogState(
-                    () => drafts.add(_ModelDraft.empty(nextDraftId++)),
-                  ),
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('添加新模型'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
+                        IconButton(
+                          tooltip: '关闭',
+                          onPressed: () =>
+                              Navigator.of(sheetContext).pop(false),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            size: 20,
+                            color: AppColors.secondary,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '按列表顺序依次尝试，前一个失败自动换下一个。\n'
-                  '支持任意 OpenAI 兼容接口；BaseUrl 只填到 /v1 会自动补 /chat/completions。\n'
-                  'Key 仅保存在本机 SharedPreferences，不会上传到任何第三方。',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    height: 1.5,
-                    color: Colors.black.withValues(alpha: 0.45),
+                  Flexible(
+                    child: drafts.isEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 24),
+                            child: Text(
+                              '还没有任何模型，点下面按钮添加一个',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: Colors.black.withValues(alpha: 0.45),
+                              ),
+                            ),
+                          )
+                        : ListView.separated(
+                            shrinkWrap: true,
+                            itemCount: drafts.length,
+                            separatorBuilder: (context, index) =>
+                                const SizedBox(height: 10),
+                            itemBuilder: (context, index) => _buildModelCard(
+                              draft: drafts[index],
+                              index: index,
+                              // 首项禁用上移、末项禁用下移（onPressed 为 null 时自动置灰）
+                              onMoveUp: index == 0
+                                  ? null
+                                  : () => setDialogState(() {
+                                      final moved = drafts.removeAt(index);
+                                      drafts.insert(index - 1, moved);
+                                    }),
+                              onMoveDown: index == drafts.length - 1
+                                  ? null
+                                  : () => setDialogState(() {
+                                      final moved = drafts.removeAt(index);
+                                      drafts.insert(index + 1, moved);
+                                    }),
+                              onDelete: () =>
+                                  setDialogState(() => drafts.removeAt(index)),
+                              onToggleObscure: () => setDialogState(
+                                () => drafts[index].obscureKey =
+                                    !drafts[index].obscureKey,
+                              ),
+                            ),
+                          ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: OutlinedButton.icon(
+                      onPressed: () => setDialogState(
+                        () => drafts.add(_ModelDraft.empty(nextDraftId++)),
+                      ),
+                      icon: const Icon(Icons.add_rounded, size: 18),
+                      label: const Text('添加新模型'),
+                      style: OutlinedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        side: const BorderSide(color: AppColors.border),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+                    child: Text(
+                      '按列表顺序依次尝试，前一个失败自动换下一个。\n'
+                      '支持任意 OpenAI 兼容接口；BaseUrl 只填到 /v1 会自动补 /chat/completions。\n'
+                      'Key 仅保存在本机 SharedPreferences，不会上传到任何第三方。',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.6,
+                        color: AppColors.muted,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    child: Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () =>
+                                Navigator.of(sheetContext).pop(false),
+                            style: OutlinedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                            ),
+                            child: const Text('取消'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () async {
+                              final collected = drafts
+                                  .where((d) => !d.isBlank)
+                                  .map((d) => d.toModel())
+                                  .toList();
+                              await AppConfig.saveLlmModels(collected);
+                              if (!sheetContext.mounted) return;
+                              Navigator.of(sheetContext).pop(true);
+                            },
+                            style: FilledButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                            ),
+                            child: const Text('保存'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () {
-                if (!dialogContext.mounted) return;
-                Navigator.of(dialogContext).pop(false);
-              },
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final collected = drafts
-                    .where((d) => !d.isBlank)
-                    .map((d) => d.toModel())
-                    .toList();
-                await AppConfig.saveLlmModels(collected);
-                if (!dialogContext.mounted) return;
-                Navigator.of(dialogContext).pop(true);
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
 
@@ -826,11 +902,11 @@ class _DashboardPageState extends State<DashboardPage> {
   }) {
     return Container(
       key: ValueKey<int>(draft.id),
-      padding: const EdgeInsets.fromLTRB(12, 6, 8, 12),
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 16),
       decoration: BoxDecoration(
-        color: const Color(0xFFFAFAFB),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -838,20 +914,29 @@ class _DashboardPageState extends State<DashboardPage> {
           Row(
             children: <Widget>[
               Container(
-                width: 3,
-                height: 12,
+                width: 24,
+                height: 24,
+                alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.60),
-                  borderRadius: BorderRadius.circular(2),
+                  color: AppColors.primaryContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '${index + 1}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.primary,
+                  ),
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
               Text(
                 '模型 ${index + 1}',
-                style: TextStyle(
-                  fontSize: 12.5,
+                style: const TextStyle(
+                  fontSize: 13,
                   fontWeight: FontWeight.w700,
-                  color: Colors.black.withValues(alpha: 0.72),
+                  color: AppColors.ink,
                 ),
               ),
               const Spacer(),
@@ -859,24 +944,26 @@ class _DashboardPageState extends State<DashboardPage> {
                 tooltip: '上移（优先级更高）',
                 onPressed: onMoveUp,
                 visualDensity: VisualDensity.compact,
-                iconSize: 20,
-                icon: const Icon(Icons.arrow_upward),
+                iconSize: 19,
+                color: AppColors.secondary,
+                icon: const Icon(Icons.arrow_upward_rounded),
               ),
               IconButton(
                 tooltip: '下移（优先级更低）',
                 onPressed: onMoveDown,
                 visualDensity: VisualDensity.compact,
-                iconSize: 20,
-                icon: const Icon(Icons.arrow_downward),
+                iconSize: 19,
+                color: AppColors.secondary,
+                icon: const Icon(Icons.arrow_downward_rounded),
               ),
               IconButton(
                 tooltip: '删除',
                 onPressed: onDelete,
                 visualDensity: VisualDensity.compact,
                 icon: const Icon(
-                  Icons.delete_outline,
-                  size: 20,
-                  color: Color(0xFFD32F2F),
+                  Icons.delete_outline_rounded,
+                  size: 19,
+                  color: AppColors.danger,
                 ),
               ),
             ],
@@ -918,7 +1005,7 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  /// 弹窗内的单个配置输入框
+  /// 弹窗内的单个配置输入框（填充式：浅灰底、10 圆角、无边框）
   Widget _buildConfigField({
     required String label,
     required String initialValue,
@@ -935,19 +1022,16 @@ class _DashboardPageState extends State<DashboardPage> {
         autocorrect: false,
         enableSuggestions: false,
         onChanged: onChanged,
-        style: const TextStyle(fontSize: 13.5),
+        style: const TextStyle(fontSize: 13.5, color: AppColors.ink),
         decoration: InputDecoration(
           labelText: label,
           hintText: hint,
-          isDense: true,
-          hintStyle: TextStyle(
-            fontSize: 11.5,
-            color: Colors.black.withValues(alpha: 0.30),
-          ),
           hintMaxLines: 1,
           suffixIcon: suffix,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 13,
+          ),
         ),
       ),
     );
@@ -980,7 +1064,16 @@ class _DashboardPageState extends State<DashboardPage> {
     if (_loadingCache) {
       return const Scaffold(
         backgroundColor: _pageBg,
-        body: Center(child: CircularProgressIndicator(strokeWidth: 2.4)),
+        body: Center(
+          child: SizedBox(
+            width: 26,
+            height: 26,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.4,
+              color: AppColors.primary,
+            ),
+          ),
+        ),
       );
     }
 
@@ -992,10 +1085,11 @@ class _DashboardPageState extends State<DashboardPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _buildGradientHeader(),
-            _buildToolbar(),
+            _buildStatCard(),
+            _buildModelChip(),
+            _buildSegmentTabs(),
             Expanded(
-              // 双视图切换动画：淡入 + 轻微上滑
+              // 视图切换动画：淡入 + 轻微上滑
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 220),
                 switchInCurve: Curves.easeOutCubic,
@@ -1020,46 +1114,53 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ),
             ),
-            _buildFooter(),
           ],
         ),
       ),
       // 悬浮按钮随视图切换：课程入口页给「导入课程」，其余给「读取作业」
-      floatingActionButton: _view == DashboardView.byShortcut
-          ? FloatingActionButton.extended(
-              onPressed: _openCourseImport,
-              label: const Text('导入课程'),
-              icon: const Icon(Icons.menu_book_outlined),
-            )
-          : FloatingActionButton.extended(
-              onPressed: _openManualEntry,
-              label: const Text('读取作业'),
-              icon: const Icon(Icons.download_rounded),
-            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _view == DashboardView.byShortcut
+            ? _openCourseImport
+            : _openManualEntry,
+        backgroundColor: AppColors.primary,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        highlightElevation: 0,
+        extendedPadding: const EdgeInsets.symmetric(horizontal: 20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        label: Text(_view == DashboardView.byShortcut ? '导入课程' : '读取作业'),
+        icon: Icon(
+          _view == DashboardView.byShortcut
+              ? Icons.menu_book_outlined
+              : Icons.download_rounded,
+          size: 20,
+        ),
+      ),
     );
   }
 
-  /// 顶部渐变统计面板
-  Widget _buildGradientHeader() {
+  /// 顶部统计大卡片：主色渐变 + 三块等宽毛玻璃小卡
+  Widget _buildStatCard() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(14, 12, 14, 0),
-      padding: const EdgeInsets.fromLTRB(18, 8, 6, 16),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.fromLTRB(18, 14, 12, 16),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(20),
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: <Color>[Color(0xFF3D5AFE), Color(0xFF7C4DFF)],
+          colors: <Color>[AppColors.primary, AppColors.violet],
         ),
-        boxShadow: <BoxShadow>[
+        boxShadow: const <BoxShadow>[
           BoxShadow(
-            color: const Color(0xFF3D5AFE).withValues(alpha: 0.28),
+            color: Color(0x204F46E5),
             blurRadius: 20,
-            offset: const Offset(0, 8),
+            offset: Offset(0, 8),
           ),
         ],
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Row(
             children: <Widget>[
@@ -1069,7 +1170,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 0.5,
+                    letterSpacing: 0.3,
                     color: Colors.white,
                   ),
                 ),
@@ -1078,7 +1179,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 tooltip: '排序方式',
                 initialValue: _sortMode,
                 onSelected: _changeSort,
-                icon: const Icon(Icons.swap_vert_rounded, color: Colors.white, size: 22),
+                position: PopupMenuPosition.under,
                 itemBuilder: (context) => SortMode.values
                     .map(
                       (mode) => PopupMenuItem<SortMode>(
@@ -1086,11 +1187,13 @@ class _DashboardPageState extends State<DashboardPage> {
                         child: Row(
                           children: <Widget>[
                             Icon(
-                              mode == _sortMode ? Icons.check_circle : Icons.circle_outlined,
+                              mode == _sortMode
+                                  ? Icons.check_circle_rounded
+                                  : Icons.circle_outlined,
                               size: 16,
                               color: mode == _sortMode
-                                  ? const Color(0xFF3D5AFE)
-                                  : Colors.black26,
+                                  ? AppColors.primary
+                                  : AppColors.muted,
                             ),
                             const SizedBox(width: 8),
                             Text(mode.label),
@@ -1099,32 +1202,160 @@ class _DashboardPageState extends State<DashboardPage> {
                       ),
                     )
                     .toList(),
+                child: _buildHeaderIcon(Icons.swap_vert_rounded),
               ),
-              IconButton(
+              _buildHeaderIcon(
+                Icons.settings_outlined,
                 tooltip: '模型设置',
-                onPressed: _showKeyDialog,
-                icon: const Icon(Icons.settings_outlined, color: Colors.white, size: 22),
+                onTap: _showKeyDialog,
+              ),
+              _buildHeaderIcon(
+                Icons.refresh_rounded,
+                tooltip: '重新提取（覆盖旧数据）',
+                onTap: _openManualEntry,
+              ),
+              PopupMenuButton<String>(
+                tooltip: '更多',
+                position: PopupMenuPosition.under,
+                onSelected: (value) {
+                  if (value == 'clear') _confirmClear();
+                  if (value == 'import') _openCourseImport();
+                  if (value == 'logout') _logout();
+                },
+                itemBuilder: (context) => const <PopupMenuEntry<String>>[
+                  PopupMenuItem<String>(
+                    value: 'import',
+                    child: Row(
+                      children: <Widget>[
+                        Icon(Icons.menu_book_outlined, size: 18),
+                        SizedBox(width: 8),
+                        Text('导入课程入口'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'clear',
+                    child: Row(
+                      children: <Widget>[
+                        Icon(Icons.delete_sweep_outlined, size: 18),
+                        SizedBox(width: 8),
+                        Text('清空本地数据'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuDivider(height: 8),
+                  PopupMenuItem<String>(
+                    value: 'logout',
+                    child: Row(
+                      children: <Widget>[
+                        Icon(
+                          Icons.logout_rounded,
+                          size: 18,
+                          color: AppColors.danger,
+                        ),
+                        SizedBox(width: 8),
+                        Text('退出登录', style: TextStyle(color: AppColors.danger)),
+                      ],
+                    ),
+                  ),
+                ],
+                child: _buildHeaderIcon(Icons.more_horiz_rounded),
               ),
             ],
           ),
-          const SizedBox(height: 2),
+          const SizedBox(height: 16),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _buildStatTile(
+                  '总待办',
+                  '$_pendingCount',
+                  const ValueKey<String>('stat-pending'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildStatTile(
+                  '紧急',
+                  '$_urgentCount',
+                  const ValueKey<String>('stat-urgent'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildStatTile(
+                  '高风险',
+                  '$_highRiskCount',
+                  const ValueKey<String>('stat-risk'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 看板右上角的圆形图标按钮（半透明白底）
+  Widget _buildHeaderIcon(
+    IconData icon, {
+    String? tooltip,
+    VoidCallback? onTap,
+  }) {
+    final child = Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: Container(
+        width: 32,
+        height: 32,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon, size: 19, color: Colors.white),
+      ),
+    );
+    if (onTap == null) return child;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: tooltip == null ? child : Tooltip(message: tooltip, child: child),
+    );
+  }
+
+  /// 毛玻璃质感的小统计卡
+  Widget _buildStatTile(String label, String value, Key valueKey) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
           Text(
-            '总待办：$_pendingCount 项 · 紧急：$_urgentCount 项',
-            textAlign: TextAlign.center,
+            value,
+            key: valueKey,
+            maxLines: 1,
             style: const TextStyle(
-              fontSize: 17,
+              fontSize: 26,
               fontWeight: FontWeight.w700,
+              height: 1.1,
               color: Colors.white,
-              height: 1.3,
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 2),
           Text(
-            '${_courses.length} 门课程 · $_highRiskCount 项高风险 · ${_sortMode.label}',
-            textAlign: TextAlign.center,
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 11.5,
-              color: Colors.white.withValues(alpha: 0.80),
+              fontSize: 12,
+              height: 1.2,
+              color: Colors.white.withValues(alpha: 0.88),
             ),
           ),
         ],
@@ -1132,70 +1363,137 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  /// 视图切换 + 操作入口
-  Widget _buildToolbar() {
+  /// 看板下方的模型胶囊：点一下打开模型设置
+  Widget _buildModelChip() {
+    final models = AppConfig.getLlmModels();
+    final usable = models.where((m) => m.hasKey).length;
+    final label = models.isEmpty ? '模型 未配置' : '模型 $usable/${models.length}';
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 6, 4),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: SegmentedButton<DashboardView>(
-              segments: const <ButtonSegment<DashboardView>>[
-                ButtonSegment<DashboardView>(
-                  value: DashboardView.byCourse,
-                  label: Text('课程'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: GestureDetector(
+          key: const ValueKey<String>('model-chip'),
+          behavior: HitTestBehavior.opaque,
+          onTap: _showKeyDialog,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+            decoration: BoxDecoration(
+              color: AppColors.primaryContainer,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                const Icon(
+                  Icons.memory_rounded,
+                  size: 14,
+                  color: AppColors.primary,
                 ),
-                ButtonSegment<DashboardView>(
-                  value: DashboardView.byTask,
-                  label: Text('作业'),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.primary,
+                  ),
                 ),
-                ButtonSegment<DashboardView>(
-                  value: DashboardView.byShortcut,
-                  label: Text('入口'),
+                const SizedBox(width: 2),
+                const Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  size: 16,
+                  color: AppColors.primary,
                 ),
               ],
-              selected: <DashboardView>{_view},
-              showSelectedIcon: false,
-              onSelectionChanged: (selection) => _changeView(selection.first),
-              style: const ButtonStyle(visualDensity: VisualDensity.compact),
             ),
           ),
-          IconButton(
-            tooltip: '重新提取（覆盖旧数据）',
-            onPressed: _openManualEntry,
-            icon: const Icon(Icons.refresh_rounded, size: 22),
-          ),
-          PopupMenuButton<String>(
-            tooltip: '更多',
-            icon: const Icon(Icons.more_vert, size: 20),
-            onSelected: (value) {
-              if (value == 'clear') _confirmClear();
-              if (value == 'import') _openCourseImport();
-            },
-            itemBuilder: (context) => const <PopupMenuEntry<String>>[
-              PopupMenuItem<String>(
-                value: 'import',
-                child: Row(
+        ),
+      ),
+    );
+  }
+
+  String _viewLabel(DashboardView view) {
+    switch (view) {
+      case DashboardView.byCourse:
+        return '课程';
+      case DashboardView.byTask:
+        return '作业';
+      case DashboardView.byShortcut:
+        return '入口';
+    }
+  }
+
+  /// 自定义滑动胶囊选项卡（替代 SegmentedButton）
+  Widget _buildSegmentTabs() {
+    const views = DashboardView.values;
+    final index = views.indexOf(_view);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+      child: Container(
+        height: 42,
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: AppColors.fill,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final tabWidth = constraints.maxWidth / views.length;
+            return Stack(
+              children: <Widget>[
+                AnimatedAlign(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment(-1 + 2 * index / (views.length - 1), 0),
+                  child: Container(
+                    width: tabWidth,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(9),
+                      boxShadow: const <BoxShadow>[
+                        BoxShadow(
+                          color: Color(0x140F172A),
+                          blurRadius: 6,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Row(
                   children: <Widget>[
-                    Icon(Icons.menu_book_outlined, size: 18),
-                    SizedBox(width: 8),
-                    Text('导入课程入口'),
+                    for (final view in views)
+                      Expanded(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => _changeView(view),
+                          child: Center(
+                            child: AnimatedDefaultTextStyle(
+                              duration: const Duration(milliseconds: 180),
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: view == _view
+                                    ? FontWeight.w700
+                                    : FontWeight.w600,
+                                color: view == _view
+                                    ? AppColors.primary
+                                    : AppColors.secondary,
+                              ),
+                              child: Text(_viewLabel(view)),
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
-              ),
-              PopupMenuItem<String>(
-                value: 'clear',
-                child: Row(
-                  children: <Widget>[
-                    Icon(Icons.delete_sweep_outlined, size: 18),
-                    SizedBox(width: 8),
-                    Text('清空本地数据'),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -1206,92 +1504,105 @@ class _DashboardPageState extends State<DashboardPage> {
     final courses = _sortedCourses;
     if (courses.isEmpty) return _buildEmptyState();
 
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+        mainAxisExtent: 152,
+      ),
       itemCount: courses.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 10),
       itemBuilder: (context, index) => _buildCourseCard(courses[index], now),
     );
   }
 
+  /// 课程网格卡片：44 图标 + 右上角待办徽章 + 课程名 + 最近截止
   Widget _buildCourseCard(CourseGroup course, DateTime now) {
     final nearest = course.nearest;
-    final accent = course.accent;
+    final pending = course.tasks.where((t) => t.isPending).length;
 
     return Card(
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      color: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
-      ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _showCourseTasks(course),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 14, 12, 14),
-          child: Row(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Container(
-                width: 44,
-                height: 44,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(Icons.menu_book_outlined, size: 22, color: accent),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      course.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 15.5,
-                        fontWeight: FontWeight.w600,
-                        height: 1.3,
-                      ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Container(
+                    width: 44,
+                    height: 44,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryContainer,
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    const SizedBox(height: 5),
-                    Text(
-                      nearest == null ? '暂无待办' : '最近：${_countdownText(nearest, now)}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: Colors.black.withValues(alpha: 0.45),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (course.taskCount > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE53935),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    '${course.taskCount}',
-                    style: const TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                    child: const Icon(
+                      Icons.menu_book_rounded,
+                      size: 22,
+                      color: AppColors.primary,
                     ),
                   ),
+                  const Spacer(),
+                  _buildCountBadge(
+                    pending,
+                    key: ValueKey<String>('course-badge-${course.name}'),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                course.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w600,
+                  height: 1.25,
+                  color: AppColors.ink,
                 ),
-              const SizedBox(width: 2),
-              Icon(Icons.chevron_right, size: 20, color: Colors.black.withValues(alpha: 0.22)),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                nearest == null ? '暂无待办' : '最近：${_countdownText(nearest, now)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  color: AppColors.secondary,
+                ),
+              ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// 右上角待办数字徽章（柔和红色胶囊，严格右对齐）
+  Widget _buildCountBadge(int count, {Key? key}) {
+    if (count <= 0) return const SizedBox.shrink();
+    return Container(
+      key: key,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      constraints: const BoxConstraints(minHeight: 20, minWidth: 22),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xFFEF4444),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        '$count',
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+          height: 1.3,
         ),
       ),
     );
@@ -1335,35 +1646,30 @@ class _DashboardPageState extends State<DashboardPage> {
         return a.courseName.compareTo(b.courseName);
       });
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Padding(
-          padding: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.fromLTRB(18, 4, 18, 2),
           child: Text(
             '共 ${_shortcuts.length} 门课程 · 点卡片直接进课程页面',
-            style: TextStyle(
-              fontSize: 11.5,
-              color: Colors.black.withValues(alpha: 0.40),
-            ),
+            style: const TextStyle(fontSize: 11.5, color: AppColors.muted),
           ),
         ),
-        for (var i = 0; i < sorted.length; i += 2) ...<Widget>[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Expanded(
-                child: _buildShortcutCard(sorted[i], i, counts),
-              ),
-              const SizedBox(width: 10),
-              if (i + 1 < sorted.length)
-                Expanded(child: _buildShortcutCard(sorted[i + 1], i + 1, counts))
-              else
-                const Expanded(child: SizedBox()),
-            ],
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 100),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 10,
+              mainAxisSpacing: 10,
+              mainAxisExtent: 152,
+            ),
+            itemCount: sorted.length,
+            itemBuilder: (context, index) =>
+                _buildShortcutCard(sorted[index], index, counts),
           ),
-          const SizedBox(height: 10),
-        ],
+        ),
       ],
     );
   }
@@ -1373,81 +1679,75 @@ class _DashboardPageState extends State<DashboardPage> {
     int index,
     Map<String, int> counts,
   ) {
-    final accent = _coursePalette[index % _coursePalette.length];
     final pending = counts[course.courseName] ?? 0;
     final hasEnc = course.enc.isNotEmpty;
 
     return Card(
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      color: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
-      ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _openCourseEntry(course),
         onLongPress: () => _confirmRemoveShortcut(course),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
+          padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Container(
-                    width: 34,
-                    height: 34,
+                    width: 44,
+                    height: 44,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: accent.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(11),
+                      color: AppColors.primaryContainer,
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(Icons.menu_book_outlined, size: 18, color: accent),
+                    child: const Icon(
+                      Icons.folder_open_rounded,
+                      size: 22,
+                      color: AppColors.primary,
+                    ),
                   ),
                   const Spacer(),
-                  if (pending > 0)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE53935),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        '$pending',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
+                  _buildCountBadge(pending),
                 ],
               ),
-              const SizedBox(height: 10),
+              const Spacer(),
               Text(
                 course.courseName,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  fontSize: 14,
+                  fontSize: 14.5,
                   fontWeight: FontWeight.w600,
-                  height: 1.3,
+                  height: 1.25,
+                  color: AppColors.ink,
                 ),
               ),
               const SizedBox(height: 4),
-              Text(
-                hasEnc ? '直达作业列表' : '打开课程主页',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: hasEnc
-                      ? const Color(0xFF2E7D32)
-                      : Colors.black.withValues(alpha: 0.40),
-                ),
+              Row(
+                children: <Widget>[
+                  if (hasEnc) ...<Widget>[
+                    const Icon(
+                      Icons.bolt_rounded,
+                      size: 12,
+                      color: AppColors.primary,
+                    ),
+                    const SizedBox(width: 2),
+                  ],
+                  Flexible(
+                    child: Text(
+                      hasEnc ? '直达作业列表' : '打开课程主页',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: hasEnc ? AppColors.primary : AppColors.muted,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1472,7 +1772,9 @@ class _DashboardPageState extends State<DashboardPage> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD32F2F)),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+            ),
             onPressed: () {
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop(true);
@@ -1493,45 +1795,57 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget _buildShortcutEmptyState() {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 28),
+        padding: const EdgeInsets.symmetric(horizontal: 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(
-              Icons.dashboard_customize_outlined,
-              size: 56,
-              color: Colors.black.withValues(alpha: 0.15),
+            Container(
+              width: 72,
+              height: 72,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AppColors.primaryContainer,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: const Icon(
+                Icons.dashboard_customize_rounded,
+                size: 32,
+                color: AppColors.primary,
+              ),
             ),
-            const SizedBox(height: 14),
-            Text(
+            const SizedBox(height: 16),
+            const Text(
               '还没有课程入口',
               style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: Colors.black.withValues(alpha: 0.55),
+                fontSize: 15.5,
+                fontWeight: FontWeight.w700,
+                color: AppColors.ink,
               ),
             ),
             const SizedBox(height: 8),
-            Text(
+            const Text(
               '点下面的按钮打开学习通课程列表，\n'
               '等课程卡片显示出来后，点右上角「保存全部课程」，\n'
               '就能一次性把整页课程存成快捷卡片。',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 12.5,
-                height: 1.6,
-                color: Colors.black.withValues(alpha: 0.38),
+                height: 1.7,
+                color: AppColors.secondary,
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: _openCourseImport,
               icon: const Icon(Icons.menu_book_outlined, size: 18),
               label: const Text('导入课程'),
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 22,
+                  vertical: 13,
+                ),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
@@ -1543,86 +1857,108 @@ class _DashboardPageState extends State<DashboardPage> {
 
   /// 任务卡片（主列表与课程弹窗共用）
   Widget _buildTaskTile(CourseTask task, DateTime now) {
-    final barColor = _urgencyColor(task, now);
-    final dimmed = _urgency(task, now) == _Urgency.expired;
+    final urgency = _urgency(task, now);
+    final dimmed = urgency == _Urgency.expired;
+    final barColor = switch (urgency) {
+      _Urgency.urgent => AppColors.danger,
+      _Urgency.soon => AppColors.warning,
+      _Urgency.expired => const Color(0xFFCBD5E1),
+      _Urgency.normal => AppColors.primary,
+    };
 
-    return Card(
-      elevation: 0,
-      margin: EdgeInsets.zero,
-      color: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: Colors.black.withValues(alpha: 0.05)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _onTaskTap(task),
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              // 左侧紧急程度色条
-              Container(width: 5, color: barColor),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        child: InkWell(
+          onTap: () => _onTaskTap(task),
+          borderRadius: BorderRadius.circular(AppRadius.card),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  // 左侧 4dp 全圆角状态彩条
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 14, 0, 14),
+                    child: Container(
+                      width: 4,
+                      decoration: BoxDecoration(
+                        color: barColor,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 14, 16, 14),
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
-                          if (task.highRisk) ...<Widget>[
-                            const Icon(Icons.lock_rounded, size: 15, color: _riskColor),
-                            const SizedBox(width: 5),
-                          ],
-                          Expanded(
-                            child: Text(
-                              task.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 14.5,
-                                fontWeight: FontWeight.w600,
-                                height: 1.3,
-                                color: dimmed
-                                    ? Colors.black.withValues(alpha: 0.38)
-                                    : Colors.black.withValues(alpha: 0.88),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              if (task.highRisk) ...<Widget>[
+                                const Icon(
+                                  Icons.lock_rounded,
+                                  size: 14,
+                                  color: AppColors.warning,
+                                ),
+                                const SizedBox(width: 4),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  task.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.35,
+                                    color: dimmed
+                                        ? AppColors.muted
+                                        : AppColors.ink,
+                                  ),
+                                ),
                               ),
-                            ),
+                              const SizedBox(width: 8),
+                              _buildCountdownChip(task, now),
+                            ],
                           ),
-                          const SizedBox(width: 8),
-                          _buildCountdownChip(task, now),
+                          const SizedBox(height: 10),
+                          Row(
+                            children: <Widget>[
+                              Flexible(
+                                child: Text(
+                                  task.courseName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppColors.secondary,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              _buildTypeTag(task.type),
+                              if (_hasStatusText(task)) ...<Widget>[
+                                const SizedBox(width: 6),
+                                _buildStatusTag(task.status),
+                              ],
+                            ],
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: <Widget>[
-                          Flexible(
-                            child: Text(
-                              task.courseName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.black.withValues(alpha: 0.48),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          _buildTypeTag(task.type),
-                          if (_hasStatusText(task)) ...<Widget>[
-                            const SizedBox(width: 6),
-                            _buildStatusTag(task.status),
-                          ],
-                        ],
-                      ),
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1635,32 +1971,36 @@ class _DashboardPageState extends State<DashboardPage> {
     return value.isNotEmpty && value != '未知';
   }
 
-  /// 状态小标签：未交红字，其他中性灰
+  /// 状态胶囊：高 22、圆角 6、浅底色
   Widget _buildStatusTag(String raw) {
     final value = raw.trim();
     final pending = HomeworkItem.isPendingStatus(value);
-    final color = pending ? _urgentColor : _expiredColor;
+    final fg = pending ? AppColors.danger : AppColors.secondary;
+    final bg = pending ? const Color(0xFFFEE2E2) : AppColors.fill;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      height: 22,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(7),
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
         value,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
-          fontSize: 10.5,
+          fontSize: 11,
           fontWeight: FontWeight.w600,
-          color: color,
+          height: 1.2,
+          color: fg,
         ),
       ),
     );
   }
 
-  /// 倒计时胶囊：<24h 红底白字，<72h 橙色，其余绿色，过期灰色
+  /// 倒计时胶囊：紧急红、临期琥珀、常规主色、过期灰
   Widget _buildCountdownChip(CourseTask task, DateTime now) {
     final urgency = _urgency(task, now);
     final Color bg;
@@ -1668,41 +2008,53 @@ class _DashboardPageState extends State<DashboardPage> {
 
     switch (urgency) {
       case _Urgency.urgent:
-        bg = _urgentColor;
-        fg = Colors.white;
+        bg = const Color(0xFFFEE2E2);
+        fg = AppColors.danger;
       case _Urgency.soon:
-        bg = _soonColor.withValues(alpha: 0.12);
-        fg = _soonColor;
+        bg = const Color(0xFFFEF3C7);
+        fg = const Color(0xFFB45309);
       case _Urgency.expired:
-        bg = const Color(0xFFF0F1F3);
-        fg = _expiredColor;
+        bg = AppColors.fill;
+        fg = AppColors.muted;
       case _Urgency.normal:
-        bg = _safeColor.withValues(alpha: 0.12);
-        fg = _safeColor;
+        bg = AppColors.primaryContainer;
+        fg = AppColors.primary;
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      height: 22,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      alignment: Alignment.center,
       decoration: BoxDecoration(
         color: bg,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
         _countdownText(task, now),
-        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: fg),
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          height: 1.2,
+          color: fg,
+        ),
       ),
     );
   }
 
-  /// 类型标签：普通作业绿色，高风险琥珀色带锁
+  /// 类型标签：普通作业主色浅底，高风险琥珀底带锁
   Widget _buildTypeTag(TaskType type) {
     final isSafe = !type.highRisk;
-    final fg = isSafe ? _safeColor : _riskColor;
+    final fg = isSafe ? AppColors.primary : _riskColor;
     final bg = isSafe ? _safeBg : _riskBg;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(6)),
+      height: 22,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
@@ -1713,7 +2065,7 @@ class _DashboardPageState extends State<DashboardPage> {
           Text(
             type.label,
             style: TextStyle(
-              fontSize: 10.5,
+              fontSize: 11,
               fontWeight: FontWeight.w600,
               color: fg,
               height: 1.2,
@@ -1727,80 +2079,62 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget _buildEmptyState() {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 28),
+        padding: const EdgeInsets.symmetric(horizontal: 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(
-              Icons.inbox_outlined,
-              size: 56,
-              color: Colors.black.withValues(alpha: 0.15),
+            Container(
+              width: 72,
+              height: 72,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AppColors.primaryContainer,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: const Icon(
+                Icons.inbox_rounded,
+                size: 32,
+                color: AppColors.primary,
+              ),
             ),
-            const SizedBox(height: 14),
-            Text(
+            const SizedBox(height: 16),
+            const Text(
               '暂无待办数据',
               style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: Colors.black.withValues(alpha: 0.55),
+                fontSize: 15.5,
+                fontWeight: FontWeight.w700,
+                color: AppColors.ink,
               ),
             ),
             const SizedBox(height: 8),
-            Text(
+            const Text(
               '点「读取作业」进入学习通，手动点到「课程 → 作业」页面，\n'
               '再点右上角的提取按钮；提取结果会自动保存在本地。\n'
               '想少找几次课？先到「入口」页把课程存成快捷卡片。',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 12.5,
-                height: 1.6,
-                color: Colors.black.withValues(alpha: 0.38),
+                height: 1.7,
+                color: AppColors.secondary,
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: _openManualEntry,
               icon: const Icon(Icons.download_rounded, size: 18),
               label: const Text('读取作业'),
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 22,
+                  vertical: 13,
+                ),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildFooter() {
-    return Padding(
-      // 右侧留 140 给「读取作业」悬浮按钮，避免按钮被盖住
-      padding: const EdgeInsets.fromLTRB(16, 0, 140, 8),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: Text(
-              _keyStatusText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11, color: Colors.black.withValues(alpha: 0.32)),
-            ),
-          ),
-          TextButton(
-            onPressed: _logout,
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-            ),
-            child: Text(
-              '退出登录',
-              style: TextStyle(fontSize: 12, color: Colors.black.withValues(alpha: 0.40)),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1816,21 +2150,16 @@ class _ModelDraft {
     required this.apiKey,
   });
 
-  factory _ModelDraft.empty(int id) => _ModelDraft(
-        id: id,
-        name: '',
-        baseUrl: '',
-        model: '',
-        apiKey: '',
-      );
+  factory _ModelDraft.empty(int id) =>
+      _ModelDraft(id: id, name: '', baseUrl: '', model: '', apiKey: '');
 
   factory _ModelDraft.fromModel(LlmModel model, int id) => _ModelDraft(
-        id: id,
-        name: model.name,
-        baseUrl: model.baseUrl,
-        model: model.model,
-        apiKey: model.apiKey,
-      );
+    id: id,
+    name: model.name,
+    baseUrl: model.baseUrl,
+    model: model.model,
+    apiKey: model.apiKey,
+  );
 
   final int id;
   String name;
@@ -1845,10 +2174,6 @@ class _ModelDraft {
       model.trim().isEmpty &&
       apiKey.trim().isEmpty;
 
-  LlmModel toModel() => LlmModel(
-        name: name,
-        baseUrl: baseUrl,
-        model: model,
-        apiKey: apiKey,
-      );
+  LlmModel toModel() =>
+      LlmModel(name: name, baseUrl: baseUrl, model: model, apiKey: apiKey);
 }

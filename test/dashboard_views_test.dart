@@ -51,6 +51,10 @@ List<CourseGroup> _previewCourses() {
 }
 
 void main() {
+  /// 顶部统计卡里的数字（按 key 取值，避免和卡片上的徽章数字混淆）
+  String statValue(WidgetTester tester, String key) =>
+      tester.widget<Text>(find.byKey(ValueKey<String>(key))).data!;
+
   Future<void> pumpDashboard(
     WidgetTester tester, {
     List<CourseGroup>? courses,
@@ -72,16 +76,38 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('按课程视图：渲染课程卡片与红点数字', (tester) async {
+  testWidgets('按课程视图：渲染课程网格卡片与待办徽章', (tester) async {
     await pumpDashboard(tester);
 
     expect(find.text('高等数学 A'), findsOneWidget);
     expect(find.text('数据结构'), findsOneWidget);
     expect(find.text('线性代数'), findsOneWidget); // 无作业课程也显示
-    expect(find.text('2'), findsNWidgets(2)); // 两门课各 2 份
+
+    // 两门课各 2 份待办：徽章挂在各自的卡片上
+    expect(
+      find.byKey(const ValueKey<String>('course-badge-高等数学 A')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('course-badge-数据结构')),
+      findsOneWidget,
+    );
+    // 线性代数没有待办 → 不显示徽章
+    expect(
+      find.byKey(const ValueKey<String>('course-badge-线性代数')),
+      findsNothing,
+    );
+
+    // 顶部统计卡：总待办 4、紧急 1（18h）、高风险 2（视频实践 + 考试）
+    expect(statValue(tester, 'stat-pending'), '4');
+    expect(statValue(tester, 'stat-urgent'), '1');
+    expect(statValue(tester, 'stat-risk'), '2');
+
     // 顶部：重新提取按钮 + 模型设置
     expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
     expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
+    // 模型胶囊在顶部看板下方
+    expect(find.byKey(const ValueKey<String>('model-chip')), findsOneWidget);
   });
 
   testWidgets('切换按作业视图：隐藏无作业课程，紧急的在前', (tester) async {
@@ -114,7 +140,7 @@ void main() {
     expect(tester.getTopLeft(find.text(later)).dy,
         lessThan(tester.getTopLeft(find.text(earlier)).dy));
 
-    await tester.tap(find.byIcon(Icons.close));
+    await tester.tap(find.byIcon(Icons.close_rounded));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('按截止时间倒序排列'), findsNothing);
@@ -212,7 +238,8 @@ void main() {
 
     await pumpDashboard(tester, courses: courses);
 
-    expect(find.text('总待办：4 项 · 紧急：4 项'), findsOneWidget);
+    expect(statValue(tester, 'stat-pending'), '4');
+    expect(statValue(tester, 'stat-urgent'), '4');
     expect(tester.takeException(), isNull);
   });
 
@@ -236,7 +263,8 @@ void main() {
 
     await pumpDashboard(tester, courses: courses);
 
-    expect(find.text('总待办：2 项 · 紧急：1 项'), findsOneWidget);
+    expect(statValue(tester, 'stat-pending'), '2');
+    expect(statValue(tester, 'stat-urgent'), '1');
     expect(tester.takeException(), isNull);
   });
 }
