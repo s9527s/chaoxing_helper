@@ -53,7 +53,7 @@ void main() {
   }
 
   group('红线一：绝对只读，不修改网页', () {
-    /// DOM 写操作的全家桶：点一下、派个事件、改内容、改值、改属性
+    /// DOM 写操作的全家桶：点一下、派个事件、改内容、改值、改属性、改地址
     final forbidden = <RegExp>[
       RegExp(r'\.click\s*\('),
       RegExp(r'\.dispatchEvent\s*\('),
@@ -61,8 +61,12 @@ void main() {
       RegExp(r'outerHTML\s*=[^=]'),
       RegExp(r'insertAdjacentHTML'),
       RegExp(r'\.insertAdjacentText'),
+      RegExp(r'\.textContent\s*=[^=]'),
+      RegExp(r'\.innerText\s*=[^=]'),
       RegExp(r'\.value\s*=[^=]'),
       RegExp(r'\.checked\s*=[^=]'),
+      RegExp(r'\.href\s*=[^=]'),
+      RegExp(r'\.src\s*=[^=]'),
       RegExp(r'\.setAttribute\s*\('),
       RegExp(r'\.removeAttribute\s*\('),
       RegExp(r'\.appendChild\s*\('),
@@ -76,13 +80,24 @@ void main() {
       RegExp(r'\.submit\s*\('),
     ];
 
+    /// 只在 JS 里有意义、Dart 里属于正常 API 的写法（如 `List.remove`），
+    /// 因此单独一组，仅用于扫注入脚本。
+    final forbiddenInJsOnly = <RegExp>[
+      RegExp(r'\.remove\s*\('),
+      RegExp(r'\.removeAttributeNode\s*\('),
+      RegExp(r'\.delete\s+[A-Za-z_$]'),
+    ];
+
     test('lib/ 下没有任何 DOM 写操作', () {
       final hits = scan(collect('lib', <String>['.dart']), forbidden);
       expect(hits, isEmpty, reason: '发现疑似写网页的代码：\n${hits.join('\n')}');
     });
 
     test('assets/ 下的注入脚本没有任何 DOM 写操作', () {
-      final hits = scan(collect('assets', <String>['.js']), forbidden);
+      final hits = scan(collect('assets', <String>['.js']), <RegExp>[
+        ...forbidden,
+        ...forbiddenInJsOnly,
+      ]);
       expect(hits, isEmpty, reason: '发现疑似写网页的脚本：\n${hits.join('\n')}');
     });
 

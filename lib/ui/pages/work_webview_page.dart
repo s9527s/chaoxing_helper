@@ -1040,7 +1040,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
                 userAgent: _desktopUA,
-                mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+                mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
                 useWideViewPort: true,
                 loadWithOverviewMode: true,
               ),
@@ -1073,13 +1073,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                 _currentPageUrl = url?.toString();
                 _syncCanGoBack();
               },
-              onJsAlert: (controller, jsAlertRequest) async {
-                _log('拦截弹窗: ${jsAlertRequest.message}');
-                return JsAlertResponse(
-                  handledByClient: true,
-                  action: JsAlertResponseAction.CONFIRM,
-                );
-              },
+              // 不接管网页弹窗：交还给网页自己显示（绝对不干预页面行为）
             ),
           ),
           // 可拖拽 / 可最小化 / 支持一键复制的悬浮面板
