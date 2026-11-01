@@ -57,6 +57,10 @@ tool/package-lock.json
 key.properties
 *.jks
 *.keystore
+*.p12
+*.pem
+*.pfx
+*.bks
 
 # Android 构建产物
 /android/build/

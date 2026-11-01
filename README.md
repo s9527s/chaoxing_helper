@@ -359,3 +359,5 @@ tool/test_row_reader.js                  页面字段提取脚本的 Node 回归
 如果你不同意上述任何一条，请立即停止使用并删除本项目。
 
 本项目采用 MIT 协议开源，详见 [LICENSE](LICENSE)。
+
+本项目所使用的第三方组件及其许可证声明，详见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
