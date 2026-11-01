@@ -4,11 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'helpers/secure_storage.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    installSecureStorage();
   });
 
   /// 默认预设是 2 个模型 → 8 个输入框，视口要够高才不会被裁掉

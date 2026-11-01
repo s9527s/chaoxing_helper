@@ -2,12 +2,13 @@
  * 题目提取脚本（严格只读）
  *
  * 设计原则：
- *  1. 只读取顶层文档里的题干与选项文字，**不穿透 iframe**；
+ *  1. 只读取顶层文档里的题干与选项**可见文字**，**不穿透 iframe**；
  *  2. **不处理图片**（不做 base64、不下载资源）；
  *  3. **不点击任何元素、不写入任何 DOM**——不设属性、不改 innerHTML、
- *     不给 input.value 赋值、不触发任何事件。
- *     （fallbackStem 里的 cloneNode 只造一个脱离文档的副本用于取文字，
- *       不会碰页面本身。）
+ *     不给 input.value 赋值、不触发任何事件、不 clone 节点；
+ *  4. **不读隐藏内容**：display:none / visibility:hidden / opacity:0 / hidden /
+ *     aria-hidden="true" / script|style 里的文字一律跳过；
+ *  5. 不回传任何 HTML：只把题干、选项等文字整理成 JSON。
  *
  * 题目归并规则（关键）：
  *  A. **题干取值要挑真的那个**。学习通有时把「简答题（10分）」这类类型标签
@@ -48,9 +49,80 @@
 
     /** 取元素可见文本并压缩空白 */
     function textOf(el) {
-        if (!el) return '';
-        var raw = el.innerText || el.textContent || '';
-        return String(raw).replace(/\s+/g, ' ').trim();
+        if (!el || !isVisible(el)) return '';
+        if (typeof el.innerText === 'string' && el.innerText.trim() !== '') {
+            return String(el.innerText).replace(/\s+/g, ' ').trim();
+        }
+        return walkVisibleText(el, '');
+    }
+
+    /** 这个元素自己是否属于「看不见 / 不该取文字」的节点 */
+    function isHidden(el) {
+        if (!el || el.nodeType !== 1) return false;
+
+        var tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'template') {
+            return true;
+        }
+        if (el.hidden === true) return true;
+        if (el.getAttribute('aria-hidden') === 'true') return true;
+
+        try {
+            var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (style) {
+                if (style.display === 'none') return true;
+                if (style.visibility === 'hidden' || style.visibility === 'collapse') return true;
+                if (style.opacity === '0') return true;
+            }
+        } catch (e) {}
+
+        return false;
+    }
+
+    /** 自身及所有祖先都可见才算可见 */
+    function isVisible(el) {
+        var node = el;
+        while (node && node.nodeType === 1) {
+            if (isHidden(node)) return false;
+            node = node.parentElement;
+        }
+        return true;
+    }
+
+    /**
+     * 遍历文本节点拼文字，跳过隐藏节点与指定子树。
+     *
+     * **只看不改**：不 clone、不删节点，页面结构与文字都不动。
+     * [dropSelector] 用于把选项区 / 答案解析区这类「不是题干」的子树排除掉。
+     */
+    function walkVisibleText(el, dropSelector) {
+        if (!el || !el.ownerDocument) return '';
+
+        var out = '';
+        try {
+            // 4 === NodeFilter.SHOW_TEXT，用数字避免依赖全局 NodeFilter
+            var walker = el.ownerDocument.createTreeWalker(el, 4, null);
+            var node = walker.nextNode();
+            var lastParent = null;
+            var lastOk = false;
+
+            while (node) {
+                var parent = node.parentElement;
+                if (parent) {
+                    if (parent !== lastParent) {
+                        lastParent = parent;
+                        lastOk = isVisible(parent) &&
+                            !(dropSelector && parent.closest && parent.closest(dropSelector));
+                    }
+                    if (lastOk) out += ' ' + node.nodeValue;
+                }
+                node = walker.nextNode();
+            }
+        } catch (e) {
+            return '';
+        }
+
+        return String(out).replace(/\s+/g, ' ').trim();
     }
 
     function toArray(nodes) {
@@ -114,18 +186,15 @@
     /**
      * 只有类型标签时（简答/作文很常见）用块内正文兜底，
      * 否则两道题会拿到同一个「作文题（20分）」，AI 根本分不清。
-     * 这里操作的是一份脱离文档的副本，不会改动页面。
+     *
+     * 这里逐文本节点读取，并跳过选项区 / 答案解析区 / 隐藏节点，
+     * 全程**不 clone、不删节点**，页面一个字节都不会被改动。
      */
     function fallbackStem(block) {
-        var clone = block.cloneNode(true);
-        var drop = clone.querySelectorAll(
+        var text = walkVisibleText(
+            block,
             'script, style, .Zy_ulTop, .mark_name, .answerSheet, .bottomList'
         );
-        for (var i = 0; i < drop.length; i++) {
-            // 只删 clone 副本里的节点，真实页面不受影响
-            if (drop[i].parentNode) drop[i].parentNode.removeChild(drop[i]); // readonly-audit-ok: clone 副本
-        }
-        var text = textOf(clone);
         // 去掉残留的类型标签前缀，如「简答题（10分）」
         text = text.replace(
             /^(?:[一二三四五六七八九十]+[、.．)）]|\d+[、.．)）])?\s*[\u4e00-\u9fa5]{2,6}题?\s*[（(][^）)]{0,12}[）)]\s*/,
@@ -353,6 +422,10 @@
         collapsedCount: collapsedCount,
         questions: questions
     };
+
+    // 只在主框架上报：本脚本若被注入到子框架，不允许往 Flutter 抛任何数据。
+    // （插件本身也只往主框架注入，这里是第二道闸，防止将来用法变化。）
+    if (window.top !== window.self) return;
 
     if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
         window.flutter_inappwebview.callHandler('onQuestionsExtracted', payload);

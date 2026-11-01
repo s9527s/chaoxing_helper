@@ -63,3 +63,8 @@ key.properties
 
 # git 内部临时目录（filter-branch 运行时会生成，绝不入库）
 /.git-rewrite/
+
+# 本地环境变量文件（真实值绝不入库，只保留无密钥的示例文件）
+.env
+.env.*
+!.env.example

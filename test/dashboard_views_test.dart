@@ -120,8 +120,9 @@ void main() {
     expect(statValue(tester, 'stat-urgent'), '1');
     expect(statValue(tester, 'stat-risk'), '2');
 
-    // 顶部：重新提取按钮 + 模型设置
-    expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+    // 顶部：模型设置（「刷新」按钮在开源版里已彻底删除）
+    expect(find.byKey(const ValueKey<String>('refresh-button')), findsNothing);
+    expect(find.byIcon(Icons.refresh_rounded), findsNothing);
     expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
     // 模型胶囊在顶部看板下方
     expect(find.byKey(const ValueKey<String>('model-chip')), findsOneWidget);

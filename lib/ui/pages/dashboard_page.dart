@@ -7,7 +7,6 @@ import '../../core/config/app_config.dart';
 import '../../core/network/cookie_sync_helper.dart';
 import '../../data/services/course_store.dart';
 import '../../data/services/scanner_service.dart';
-import '../../data/services/task_refresh_service.dart';
 import '../../data/services/task_store.dart';
 import 'login_page.dart';
 import 'work_webview_page.dart';
@@ -172,10 +171,7 @@ class _DashboardPageState extends State<DashboardPage> {
   /// 首帧读缓存期间显示 loading，避免闪一下空态
   bool _loadingCache = true;
 
-  /// 「刷新」进行中：刷新图标换成转圈，防止连点
-  bool _refreshing = false;
-
-  /// 数据版本号：导入/刷新/删除后 +1，用来给列表做平滑过渡动画
+  /// 数据版本号：导入/删除后 +1，用来给列表做平滑过渡动画
   int _dataVersion = 0;
 
   /// 课程色板，按出现顺序循环取色
@@ -508,85 +504,6 @@ class _DashboardPageState extends State<DashboardPage> {
     if (merged.replaced > 0) parts.add('覆盖旧数据 ${merged.replaced} 条');
     if (merged.dropped > 0) parts.add('过滤 ${merged.dropped} 条');
     _toast(parts.join(' · '));
-  }
-
-  // ---------------- 刷新（用户主动触发，仅看板已有课程） ----------------
-
-  /// 给看板上的某门课找一份可用的课程引用。
-  ///
-  /// 优先「入口」里同名的课程（信息最全，带 cpi/enc，能直接打开作业列表）；
-  /// 没有的话从它任一作业 URL 反解 courseId / classId（作业页 URL 上一定有）。
-  CourseRef? _refForCourse(CourseGroup group) {
-    final name = group.name.trim();
-    for (final ref in _shortcuts) {
-      if (ref.hasIds && ref.courseName.trim() == name) return ref;
-    }
-    for (final task in group.tasks) {
-      final ref = CourseRef.fromUrl(task.url, courseName: group.name);
-      if (ref != null && ref.hasIds) return ref;
-    }
-    return null;
-  }
-
-  /// 顶部刷新：用**已登录的 Cookie** 把看板里已有课程的作业列表各请求一次。
-  ///
-  /// 不做全量抓取、不做后台轮询：只有手指点到这个按钮才会发请求，
-  /// 而且只请求看板上已经存在的课程，最多 3 个并发。
-  Future<void> _refreshAll() async {
-    if (_refreshing) return;
-    if (_courses.isEmpty) {
-      _toast('看板还没有作业，请先点「读取作业」提取一次');
-      return;
-    }
-
-    final targets = <String, CourseRef>{};
-    var missing = 0;
-    for (final course in _courses) {
-      final ref = _refForCourse(course);
-      if (ref == null) {
-        missing++;
-        continue;
-      }
-      targets.putIfAbsent(ref.key, () => ref);
-    }
-
-    if (targets.isEmpty) {
-      _toast('这些课程还没有课程入口，无法单独刷新；请点「读取作业」进网页重新提取');
-      return;
-    }
-
-    setState(() => _refreshing = true);
-    try {
-      final outcomes = await TaskRefreshService.instance.refreshCourses(
-        targets.values.toList(),
-        onLog: (message) => debugPrint('[Refresh] $message'),
-      );
-      if (!mounted) return;
-
-      final next = TaskRefreshService.applyRefresh(_items, outcomes);
-      final okCount = outcomes.where((o) => o.ok).length;
-      final failed = outcomes.where((o) => !o.ok).length;
-      final cleared = outcomes.where((o) => o.isEmpty).length;
-
-      setState(() {
-        _items = next;
-        _courses = _groupByCourse(next);
-        _now = DateTime.now();
-        _dataVersion++;
-      });
-      await TaskStore.save(next);
-
-      if (!mounted) return;
-      final parts = <String>['刷新完成：$okCount 门课'];
-      if (cleared > 0) parts.add('$cleared 门已无未交作业');
-      if (failed > 0) parts.add('$failed 门失败（保留旧数据）');
-      if (missing > 0) parts.add('$missing 门缺入口跳过');
-      _toast(parts.join(' · '));
-    } catch (e) {
-      if (mounted) _toast('刷新失败：$e');
-    } finally {
-      if (mounted) setState(() => _refreshing = false);
-    }
   }
 
   // ---------------- 侧滑删除（交了作业就让它消失） ----------------
@@ -1052,7 +969,20 @@ class _DashboardPageState extends State<DashboardPage> {
                                   .where((d) => !d.isBlank)
                                   .map((d) => d.toModel())
                                   .toList();
-                              await AppConfig.saveLlmModels(collected);
+                              // Key 写加密存储失败时不能关弹窗：
+                              // 否则用户以为存上了，实际下次启动 Key 就没了
+                              final saved = await AppConfig.saveLlmModels(collected);
+                              if (!saved) {
+                                if (!sheetContext.mounted) return;
+                                ScaffoldMessenger.of(sheetContext)
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(
+                                    const SnackBar(
+                                      content: Text('API Key 写入系统加密存储失败，请重试'),
+                                    ),
+                                  );
+                                return;
+                              }
                               if (!sheetContext.mounted) return;
                               Navigator.of(sheetContext).pop(true);
                             },
@@ -1409,7 +1339,6 @@ class _DashboardPageState extends State<DashboardPage> {
                         tooltip: '模型设置',
                         onTap: _showKeyDialog,
                       ),
-                      _buildRefreshButton(),
                       PopupMenuButton<String>(
                         tooltip: '更多',
                         position: PopupMenuPosition.under,
@@ -1524,44 +1453,6 @@ class _DashboardPageState extends State<DashboardPage> {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: tooltip == null ? child : Tooltip(message: tooltip, child: child),
-    );
-  }
-
-  /// 刷新按钮：进行中显示转圈，避免连点发起多轮请求
-  Widget _buildRefreshButton() {
-    return Tooltip(
-      message: '刷新（只请求看板里已有的课程）',
-      child: GestureDetector(
-        key: const ValueKey<String>('refresh-button'),
-        behavior: HitTestBehavior.opaque,
-        onTap: _refreshing ? null : _refreshAll,
-        child: Padding(
-          padding: const EdgeInsets.only(left: 6),
-          child: Container(
-            width: 32,
-            height: 32,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: _refreshing ? 0.28 : 0.16),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: _refreshing
-                ? const SizedBox(
-                    width: 15,
-                    height: 15,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : const Icon(
-                    Icons.refresh_rounded,
-                    size: 19,
-                    color: Colors.white,
-                  ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -1753,7 +1644,7 @@ class _DashboardPageState extends State<DashboardPage> {
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInOutCubic,
       child: GridView.builder(
-        // 刷新 / 删除后整表换一批，用淡入过渡而不是硬闪
+        // 导入 / 删除后整表换一批，用淡入过渡而不是硬闪
         key: ValueKey<String>('course-grid-$_dataVersion'),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -1872,7 +1763,7 @@ class _DashboardPageState extends State<DashboardPage> {
       duration: const Duration(milliseconds: 260),
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInOutCubic,
-      // 导入 / 刷新后整表换一批数据，用淡入过渡而不是硬闪
+      // 导入 / 删除后整表换一批数据，用淡入过渡而不是硬闪
       child: ListView.separated(
         key: ValueKey<String>('task-list-$_dataVersion'),
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),

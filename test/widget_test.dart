@@ -4,12 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'helpers/secure_storage.dart';
+
 void main() {
   testWidgets('看板首帧不再自动扫描，直接显示空状态与提取引导', (WidgetTester tester) async {
     // 后台自动扫描已移除：进页面时不会发起任何网络/WebView 请求，
     // 未导入数据时就是空状态。
     // 预热 SharedPreferences，让 TaskStore 的缓存读取在测试内能立刻完成
     SharedPreferences.setMockInitialValues(<String, Object>{});
+    installSecureStorage();
     await AppConfig.init();
 
     await tester.pumpWidget(const MaterialApp(home: DashboardPage()));

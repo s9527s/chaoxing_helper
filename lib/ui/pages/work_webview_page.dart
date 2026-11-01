@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -79,11 +78,12 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   /// 当前 WebView 地址（由加载回调维护，避免在同步代码里 await getUrl）
   String? _currentPageUrl;
 
-  /// 只读的页面状态指纹：表单控件数量 + 它们当前值的总长度 + HTML 总长度。
+  /// 只读的页面状态指纹：表单控件数量 + 它们当前值的总长度 + 元素节点总数。
   ///
   /// **全程只读**（`input.value` 也只读取不赋值），
   /// 用来在运行前后各采一次，向用户证明本 App 没有改动网页。
   /// 只扫顶层文档，不穿透 iframe——与提取脚本保持同一原则。
+  /// 刻意**不读 innerHTML / outerHTML**，只数节点，连一字节页面内容都不带回。
   static const String _fingerprintBody = r'''
     var fields = document.querySelectorAll('input, textarea, select');
     var valueLen = 0;
@@ -94,9 +94,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     return JSON.stringify({
       fields: fields.length,
       valueLen: valueLen,
-      htmlLen: document.documentElement
-        ? document.documentElement.outerHTML.length
-        : 0
+      nodes: document.getElementsByTagName('*').length
     });
   ''';
 
@@ -106,11 +104,6 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   /// 网页是否还能后退（缓存值，供 PopScope.canPop 同步读取）
   bool _canGoBack = false;
 
-  /// 各 frame 主动上报的 HTML（key = frame 的 href）
-  final Map<String, String> _frameHtmls = <String, String>{};
-
-  /// 各 frame 的 document.title，用于推断课程名
-  final Map<String, String> _frameTitles = <String, String>{};
   List<Map<String, dynamic>> _cachedQuestions = [];
   Completer<Map<String, dynamic>>? _extractCompleter;
 
@@ -130,53 +123,9 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     super.dispose();
   }
 
-  /// 只注入一个**只读**脚本：让每个 frame 把自身 outerHTML 抛回来，
-  /// 用于「提取本页作业」把作业列表导入看板。
-  /// 该脚本不点击、不修改任何 DOM，也没有任何指纹伪装。
-  UnmodifiableListView<UserScript> _buildInitialUserScripts() {
-    return UnmodifiableListView<UserScript>(<UserScript>[
-      UserScript(
-        source: _frameReporterJs,
-        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-        forMainFrameOnly: false,
-      ),
-    ]);
-  }
-
-  /// 每个 frame 加载完成后主动把自身 HTML 抛回 Flutter
-  static const String _frameReporterJs = r'''
-    (function () {
-      var posted = {};
-
-      function post(tag) {
-        try {
-          var html = document.documentElement ? document.documentElement.outerHTML : '';
-          if (!html || html.length < 200) return;
-          if (posted[tag]) return;
-          posted[tag] = true;
-          if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-            window.flutter_inappwebview.callHandler('onFrameHtml', JSON.stringify({
-              tag: tag,
-              href: location.href,
-              title: document.title || '',
-              html: html
-            }));
-          }
-        } catch (e) {}
-      }
-
-      try {
-        if (document.readyState === 'complete' || document.readyState === 'interactive') {
-          setTimeout(function () { post('now'); }, 500);
-        }
-        window.addEventListener('load', function () {
-          setTimeout(function () { post('load'); }, 800);
-        });
-        // 异步渲染兜底：稍后再补发一次
-        setTimeout(function () { post('late'); }, 3000);
-      } catch (e) {}
-    })();
-  ''';
+  /// 页面加载阶段**不做任何采集**：
+  /// 不注入脚本、不注册 frame 上报桥、不自动 dump 页面内容。
+  /// 所有读取都发生在用户点按钮的那一次调用里（见 [_readPageRows]）。
 
   void _startDomProbeTimer() {
     _domProbeTimer?.cancel();
@@ -194,18 +143,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
         return;
       }
 
+      // 只看顶层文档：与提取脚本保持同一边界，不遍历 iframe。
+      // 题目若在跨域 iframe 里，本工具本来也提取不到，按钮就不该点亮。
       const String probeJs = """
-        (function() {
-          if (document.querySelectorAll('.TiMu, .questionLi').length > 0) return true;
-          const iframes = document.querySelectorAll('iframe');
-          for (var i = 0; i < iframes.length; i++) {
-            try {
-              var doc = iframes[i].contentDocument || iframes[i].contentWindow.document;
-              if (doc && doc.querySelectorAll('.TiMu, .questionLi').length > 0) return true;
-            } catch (e) {}
-          }
-          return false;
-        })();
+        document.querySelectorAll('.TiMu, .questionLi').length > 0
       """;
 
       try {
@@ -225,45 +166,171 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   }
 
   void _handleQuestionsExtracted(List<dynamic> args) {
-    if (args.isEmpty || args.first == null) return;
-    final Map<String, dynamic> payload = args.first is String
-        ? Map<String, dynamic>.from(jsonDecode(args.first as String))
-        : Map<String, dynamic>.from(args.first as Map);
+    if (args.length != 1 || args.first == null) return;
 
-    final int total = (payload['totalCount'] as num?)?.toInt() ?? 0;
-    final int solvable = (payload['solvableCount'] as num?)?.toInt() ?? 0;
-    final int collapsed = (payload['collapsedCount'] as num?)?.toInt() ?? 0;
-    _cachedQuestions = List<Map<String, dynamic>>.from(
-      payload['questions'] as List? ?? [],
-    );
+    final payload = _decodeBridgePayload(args.first);
+    if (payload == null) {
+      // 超长在解码处已经报过准确提示，这里不再叠一条含糊的「结构不符」
+      if (_bridgeRejectedBySize) {
+        _bridgeRejectedBySize = false;
+        return;
+      }
+      _log('⚠️ 提取脚本回传的数据结构不符合预期，本次已忽略');
+      return;
+    }
+
+    final questions = <Map<String, dynamic>>[];
+    final rawQuestions = payload['questions'];
+    if (rawQuestions is List) {
+      for (final raw in rawQuestions) {
+        if (questions.length >= _bridgeMaxQuestions) break;
+        final question = _sanitizeQuestion(raw);
+        if (question != null) questions.add(question);
+      }
+    }
+
+    final collapsed = payload['collapsedCount'] is num
+        ? (payload['collapsedCount'] as num).toInt()
+        : 0;
+
+    _cachedQuestions = questions;
+    final int total = questions.length;
 
     if (collapsed > 0) {
       _log('去重：折叠了 $collapsed 个子块，同一大题的多个空只算一题');
     }
-    _progressController.updateQuestionStats(total, solvable);
+    _progressController.updateQuestionStats(total, total);
     if (_extractCompleter != null && !_extractCompleter!.isCompleted) {
-      _extractCompleter!.complete(payload);
+      _extractCompleter!.complete(<String, dynamic>{
+        'questions': questions,
+        'totalCount': total,
+      });
     }
   }
 
-  /// 子 frame 上报自身 HTML
-  void _handleFrameHtml(List<dynamic> args) {
-    if (args.isEmpty || args.first == null) return;
-    try {
-      final payload = args.first is String
-          ? Map<String, dynamic>.from(jsonDecode(args.first as String) as Map)
-          : Map<String, dynamic>.from(args.first as Map);
-      final href = (payload['href'] ?? '').toString();
-      final html = (payload['html'] ?? '').toString();
-      final title = (payload['title'] ?? '').toString();
-      if (html.isEmpty) return;
-      final key = href.isEmpty ? 'frame_${_frameHtmls.length}' : href;
-      _frameHtmls[key] = html;
-      _frameTitles[key] = title;
-      debugPrint('[WorkWebView] frame 上报 ${html.length} 字: $href');
-    } catch (e) {
-      debugPrint('[WorkWebView] frame 上报解析失败: $e');
+  /// 桥接回传数据的硬上限：超过就整包丢弃，不做「尽力解析」。
+  ///
+  /// 体积一律按 **UTF-8 实际字节数** 计（[utf8.encode] 后的 length）。
+  /// 只数字符数是挡不住的：一个汉字在 UTF-8 里占 3 字节，
+  /// 200K 字符的中文载荷最坏能到 600KB。
+  static const int _bridgeMaxPayloadBytes = 200 * 1024;
+
+  /// 原有的字符数上限，保留作为第一道快速短路（先按字符数挡，再按字节复核）
+  static const int _bridgeMaxPayloadChars = 200 * 1024;
+  static const int _bridgeMaxQuestions = 300;
+  static const int _bridgeMaxStemChars = 2000;
+  static const int _bridgeMaxOptions = 12;
+  static const int _bridgeMaxOptionChars = 500;
+
+  /// 上一次解码是否因「超长」被拒。
+  ///
+  /// 只为了给用户一条准确的提示（超长 vs 结构不符），每次解码前重置。
+  bool _bridgeRejectedBySize = false;
+
+  /// 把网页交回来的东西解成 Map。
+  ///
+  /// 只接受「Map」或「长度受限的 JSON 字符串」，其余类型（数字、数组、
+  /// 超长字符串）一律当非法数据丢弃——这一层不信任网页侧的任何输入。
+  ///
+  /// **两条入口共用同一道体积闸**：Map 先序列化成 JSON 文本，再和字符串
+  /// 入口一样按 UTF-8 字节数计量，不存在「绕过 Map 就不查大小」的路径。
+  Map<String, dynamic>? _decodeBridgePayload(dynamic raw) {
+    _bridgeRejectedBySize = false;
+
+    final String text;
+    if (raw is String) {
+      // ---- 入口 1：字符串（网页脚本的常规形态）----
+      text = raw;
+    } else if (raw is Map) {
+      // ---- 入口 2：Map（插件在部分平台会直接交出已解析对象）----
+      // 键统一成 String（与旧行为一致）后再序列化；循环引用 / 含不可编码
+      // 对象（Function、DateTime 等）时 jsonEncode 会抛，直接整包丢弃。
+      final normalized = <String, dynamic>{};
+      try {
+        raw.forEach((k, v) => normalized[k.toString()] = v);
+        text = jsonEncode(normalized);
+      } catch (e) {
+        debugPrint('[WorkWebView] 桥接 Map 序列化失败，已丢弃: ${e.runtimeType}');
+        return null;
+      }
+    } else {
+      return null;
     }
+
+    if (text.isEmpty) return null;
+
+    if (!_bridgePayloadWithinLimit(text)) {
+      _bridgeRejectedBySize = true;
+      _log('⚠️ 桥接数据超长，已拦截');
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is! Map) return null;
+      return Map<String, dynamic>.from(decoded);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 体积闸门：先按字符数快速短路，再按 UTF-8 实际字节数复核。
+  ///
+  /// 任何一步不通过都返回 false（宁可丢包，不做「截断后尽力解析」）。
+  static bool _bridgePayloadWithinLimit(String text) {
+    if (text.length > _bridgeMaxPayloadChars) return false;
+    try {
+      return utf8.encode(text).length <= _bridgeMaxPayloadBytes;
+    } catch (e) {
+      // utf8.encode 正常不会抛；真抛了按超限处理
+      return false;
+    }
+  }
+
+  /// 单题清洗：只保留白名单字段，类型/长度不符的直接丢弃
+  Map<String, dynamic>? _sanitizeQuestion(dynamic raw) {
+    if (raw is! Map) return null;
+
+    final stem = _bridgeText(raw['stem'], _bridgeMaxStemChars);
+    if (stem.isEmpty) return null;
+
+    final options = <Map<String, String>>[];
+    final rawOptions = raw['options'];
+    if (rawOptions is List) {
+      for (final option in rawOptions) {
+        if (options.length >= _bridgeMaxOptions) break;
+        if (option is Map) {
+          final text = _bridgeText(option['text'], _bridgeMaxOptionChars);
+          if (text.isEmpty) continue;
+          options.add(<String, String>{
+            'label': _bridgeText(option['label'], 2),
+            'text': text,
+          });
+        } else {
+          final text = _bridgeText(option, _bridgeMaxOptionChars);
+          if (text.isEmpty) continue;
+          options.add(<String, String>{'label': '', 'text': text});
+        }
+      }
+    }
+
+    return <String, dynamic>{
+      'index': raw['index'] is num ? (raw['index'] as num).toInt() : 0,
+      'type': _bridgeText(raw['type'], 16),
+      'stem': stem,
+      'options': options,
+      'blankCount': raw['blankCount'] is num
+          ? (raw['blankCount'] as num).toInt()
+          : 0,
+    };
+  }
+
+  /// 只接受标量，压空白并截断；Map / List / 超长内容一律不接
+  static String _bridgeText(dynamic value, int max) {
+    if (value == null || value is Map || value is List) return '';
+    final text = value.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) return '';
+    return text.length > max ? text.substring(0, max) : text;
   }
 
   /// 界面日志（logcat 镜像由 controller 的 logSink 统一负责，
@@ -627,7 +694,85 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
   }
 
-  /// 抓取当前页 HTML（含 iframe 内容）+ 课程名，解析成任务后回传给看板
+  // ---------------- 用户点击后才读页面 ----------------
+
+  /// 作业行 / 课程卡片的读取脚本（只在用户点击按钮后注入）
+  static const String _pageReaderAsset = 'assets/js/page_reader.js';
+
+  /// 单次读取最多接受的字符数与行数
+  static const int _maxPageRowsPayloadChars = 100 * 1024;
+  static const int _maxPageRows = 300;
+
+  /// 用户点「提取作业 / 保存全部」后才执行一次，读的是**字段**而不是 HTML。
+  ///
+  /// 数据最小化（本轮 P0 的重点）：
+  ///  - 网页侧（`page_reader.js`）直接从 DOM 里挑标题 / 状态 / 截止时间这几段
+  ///    可见文字，加上行上的 data 链接，拼成 JSON；
+  ///  - **不再传 `outerHTML`**，也不传 innerHTML、隐藏表单字段、Cookie、
+  ///    内部无关 id / class；
+  ///  - 只读顶层文档，不遍历 iframe；
+  ///  - 日志只打域名（脚本直接给 `location.host`），带 stuenc / courseId 的
+  ///    完整地址既不进 Dart 也不进日志。
+  ///
+  /// [accessor] 是脚本暴露的两个方法名之一：`tasks`（作业行）/ `courses`（课程卡片）。
+  Future<_PageRows?> _readPageRows(String accessor) async {
+    final controller = _webViewController;
+    if (controller == null) return null;
+
+    try {
+      await controller.injectJavascriptFileFromAsset(
+        assetFilePath: _pageReaderAsset,
+      );
+
+      final result = await controller.callAsyncJavaScript(
+        functionBody: """
+          if (!window.__cxPageReader ||
+              typeof window.__cxPageReader.$accessor !== 'function') {
+            return '';
+          }
+          return JSON.stringify(window.__cxPageReader.$accessor());
+        """,
+      );
+
+      final raw = (result?.value ?? '').toString();
+      if (raw.isEmpty || raw == 'null') return null;
+      if (raw.length > _maxPageRowsPayloadChars) return null;
+
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final payload = Map<String, dynamic>.from(decoded);
+
+      final rows = <Map<String, dynamic>>[];
+      final rawRows = payload['rows'];
+      if (rawRows is List) {
+        for (final row in rawRows) {
+          if (rows.length >= _maxPageRows) break;
+          if (row is Map) {
+            rows.add(Map<String, dynamic>.from(row));
+          }
+        }
+      }
+
+      return _PageRows(
+        host: _safeHost(payload['host']),
+        pageTitle: _bridgeText(payload['pageTitle'], 120),
+        courseName: _bridgeText(payload['courseName'], 40),
+        rows: rows,
+      );
+    } catch (e) {
+      debugPrint('[WorkWebView] 读取页面结构化数据失败: $e');
+      return null;
+    }
+  }
+
+  /// 域名只留 host 字符集：防止日志里混进路径、参数或换行
+  static String _safeHost(dynamic value) {
+    final text = _bridgeText(value, 80).toLowerCase();
+    if (text.isEmpty) return '未知域名';
+    return RegExp(r'^[a-z0-9.\-]+$').hasMatch(text) ? text : '未知域名';
+  }
+
+  /// 「提取作业」：只有用户点这个按钮，才会去读当前页 DOM 并解析成任务。
   Future<void> _extractTasksFromCurrentPage() async {
     final controller = _webViewController;
     if (controller == null) {
@@ -639,55 +784,21 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     if (await _guardSubmittedWork()) return;
 
     try {
-      _log('正在提取本页作业…');
+      _log('正在读取本页作业…');
 
-      final items = <HomeworkItem>[];
-      final seenUrls = <String>{};
-
-      // ---------- 方案 1：用各 frame 自报的 HTML ----------
-      // 学习通把作业列表放在内容区 iframe（跨域），顶层读不到 contentDocument，
-      // 所以靠注入脚本让子 frame 自己把 outerHTML 抛回来。
-      final courseName = _guessCourseName();
-
-      for (final html in _frameHtmls.values) {
-        final parsed = ScannerService.instance.parseTasksFromHtml(
-          html,
-          courseName: courseName,
-        );
-        for (final item in parsed) {
-          if (seenUrls.add(item.url)) items.add(item);
-        }
+      final page = await _readPageRows('tasks');
+      if (page == null || page.rows.isEmpty) {
+        _showSnack('没读到作业行，请等作业列表加载出来再点一次');
+        return;
       }
-      _log('frame 快照 ${_frameHtmls.length} 个 → ${items.length} 条作业');
+      _log('已读到 ${page.rows.length} 行作业（域名 ${page.host}）');
 
-      // ---------- 方案 2：都没有就抓当前帧 ----------
-      if (items.isEmpty) {
-        final CallAsyncJavaScriptResult? dumpResult = await controller
-            .callAsyncJavaScript(
-              functionBody: r"""
-            var html = document.documentElement ? document.documentElement.outerHTML : '';
-            return JSON.stringify({ href: location.href, html: html });
-          """,
-            );
-
-        final dynamic raw = dumpResult?.value;
-        if (raw != null) {
-          final payload = Map<String, dynamic>.from(
-            jsonDecode(raw.toString()) as Map,
-          );
-          final html = (payload['html'] ?? '').toString();
-          if (html.isNotEmpty) {
-            final parsed = ScannerService.instance.parseTasksFromHtml(
-              html,
-              courseName: courseName,
-            );
-            for (final item in parsed) {
-              if (seenUrls.add(item.url)) items.add(item);
-            }
-            _log('当前帧解析到 ${items.length} 条作业');
-          }
-        }
-      }
+      final courseName = _guessCourseName(page.courseName, page.pageTitle);
+      final items = ScannerService.instance.parseTaskRows(
+        page.rows,
+        courseName: courseName,
+      );
+      _log('解析到 ${items.length} 条作业');
 
       if (items.isEmpty) {
         _showSnack('本页没解析到作业：请先点进课程里的「作业」列表，等它加载出来再点提取');
@@ -696,7 +807,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
 
       // 顺手把这门课记进快捷入口：下次直接跳回这个页面
       final currentUrl = (await controller.getUrl())?.toString() ?? '';
-      await _rememberCourseFromUrl(currentUrl);
+      await _rememberCourseFromUrl(currentUrl, courseName);
 
       if (!mounted) return;
       // 把结果回传给看板（通过路由返回值接收）
@@ -707,23 +818,10 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
   }
 
-  /// 推断课程名：先从各 frame 的 HTML 里找课程名节点，再退化到 document.title
-  String _guessCourseName() {
-    final patterns = <RegExp>[
-      RegExp(
-        r'class="[^"]*course-?name[^"]*"[^>]*>\s*([^<]{2,40})<',
-        caseSensitive: false,
-      ),
-      RegExp(r'id="courseName"[^>]*>\s*([^<]{2,40})<', caseSensitive: false),
-    ];
-
-    for (final html in _frameHtmls.values) {
-      for (final pattern in patterns) {
-        final match = pattern.firstMatch(html);
-        final value = match?.group(1)?.trim() ?? '';
-        if (value.isNotEmpty) return value;
-      }
-    }
+  /// 推断课程名：先用网页给的课程名节点文字，再退化到 document.title
+  String _guessCourseName(String hint, String title) {
+    final fromHint = _cleanCourseName(hint);
+    if (fromHint.isNotEmpty) return fromHint;
 
     const generic = <String>{
       '作业',
@@ -741,19 +839,11 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
       '考试列表',
     };
 
-    // 各 frame 的 title 里，课程名通常最长（"英语四六级刷题冲刺" > "任务列表"）
-    final candidates = <String>[];
-    for (final title in _frameTitles.values) {
-      var value = title.trim();
-      if (value.isEmpty || generic.contains(value)) continue;
-      value = value.split(RegExp(r'\s+|、|\|')).first.trim();
-      if (value.isEmpty || generic.contains(value)) continue;
-      candidates.add(value);
-    }
-
-    if (candidates.isEmpty) return widget.workTitle;
-    candidates.sort((a, b) => b.length.compareTo(a.length));
-    return candidates.first;
+    var value = title.trim();
+    if (value.isEmpty || generic.contains(value)) return widget.workTitle;
+    value = value.split(RegExp(r'\s+|、|\|')).first.trim();
+    if (value.isEmpty || generic.contains(value)) return widget.workTitle;
+    return value;
   }
 
   void _showSnack(String message) {
@@ -805,11 +895,11 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
   ///
   /// 在学习通里，课程页/作业列表页的 URL 上带着 courseId、classId，
   /// 很多时候还带 enc。存下来后，主页的快捷卡片就能直接跳回这个页面。
-  Future<void> _rememberCourseFromUrl(String rawUrl) async {
+  Future<void> _rememberCourseFromUrl(String rawUrl, String courseName) async {
     final ref = CourseRef.fromUrl(rawUrl);
     if (ref == null) return;
 
-    final name = _cleanCourseName(_guessCourseName());
+    final name = _cleanCourseName(courseName);
     try {
       await CourseStore.upsertMany(<CourseRef>[
         CourseRef(
@@ -826,7 +916,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     }
   }
 
-  /// 「保存全部课程」：只读当前页 DOM，把整页课程卡片存成快捷入口。
+  /// 「保存全部课程」：用户点击后只读一次当前页 DOM，把整页课程卡片存成快捷入口。
   ///
   /// 全程不点击、不跳转、不修改 DOM——只是把页面上已经渲染好的
   /// `<a class="color1">` 课程链接读出来。
@@ -840,35 +930,26 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     try {
       _log('正在读取本页课程…');
 
-      final collected = <CourseRef>[];
-      final seen = <String>{};
-
-      // ---------- 1) 先用各 frame 已经上报的 HTML ----------
-      for (final html in _frameHtmls.values) {
-        _collectCoursesFromHtml(html, collected, seen);
+      // 点击这一次才读页面，不做任何后台/加载期采集
+      final page = await _readPageRows('courses');
+      if (page == null) {
+        _showSnack('没读到页面内容，请等网页加载完再点一次');
+        return;
       }
 
-      // ---------- 2) 再抓一次当前文档，防 AJAX 刚渲染完还没上报 ----------
-      if (collected.isEmpty) {
-        final dump = await controller.callAsyncJavaScript(
-          functionBody: r"""
-            return document.documentElement ? document.documentElement.outerHTML : '';
-          """,
-        );
-        final html = (dump?.value ?? '').toString();
-        if (html.isNotEmpty) {
-          _collectCoursesFromHtml(html, collected, seen);
-        }
-      }
+      // 网页侧只给「课程名 + 卡片链接」，不再交 HTML
+      final collected = ScannerService.instance.parseCourseRows(page.rows);
+      final seen = collected.map((c) => c.key).toSet();
+      final courseName = _guessCourseName(page.courseName, page.pageTitle);
 
-      // ---------- 3) 兜底：直接解析当前地址（单门课） ----------
+      // 兜底：直接解析当前地址（单门课）
       if (collected.isEmpty) {
         final url = (await controller.getUrl())?.toString() ?? '';
         final ref = CourseRef.fromUrl(url);
         if (ref != null && seen.add(ref.key)) {
           collected.add(
             CourseRef(
-              courseName: _cleanCourseName(_guessCourseName()),
+              courseName: _cleanCourseName(courseName),
               courseId: ref.courseId,
               classId: ref.classId,
               cpi: ref.cpi,
@@ -897,19 +978,6 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
     } catch (e) {
       _log('❌ 课程导入失败: $e');
       _showSnack('课程导入失败：$e');
-    }
-  }
-
-  /// 从一段 HTML 里解析课程卡片并去重收集
-  void _collectCoursesFromHtml(
-    String html,
-    List<CourseRef> collected,
-    Set<String> seen,
-  ) {
-    if (html.isEmpty) return;
-    for (final course in ScannerService.instance.parseCourseListHtml(html)) {
-      if (!seen.add(course.key)) continue;
-      collected.add(course);
     }
   }
 
@@ -1034,31 +1102,32 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
           Positioned.fill(
             child: InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri(widget.workUrl)),
-              // 唯一的注入脚本：只读上报 frame HTML（用于导入作业列表）
-              initialUserScripts: _buildInitialUserScripts(),
+              // 刻意不给 WebView 挂任何「文档启动即执行」的脚本：页面加载阶段零注入、零采集
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 domStorageEnabled: true,
+                // 仅用于保持桌面版页面布局，不用于绕过风控
+                // （不改请求头、不带任何伪造字段，纯 UA 字符串）
                 userAgent: _desktopUA,
                 mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
                 useWideViewPort: true,
                 loadWithOverviewMode: true,
+                // 本页只用于「显示 + 用户点击后只读提取」：
+                // 不允许读本地文件，也不允许 file:// 页面跨源访问任何资源。
+                allowFileAccess: false,
+                allowContentAccess: false,
+                allowFileAccessFromFileURLs: false,
+                allowUniversalAccessFromFileURLs: false,
               ),
               onWebViewCreated: (controller) {
                 _webViewController = controller;
+                // 唯一的桥：提取脚本回传题目文字（脚本只在用户点击时注入）
                 controller.addJavaScriptHandler(
                   handlerName: 'onQuestionsExtracted',
                   callback: _handleQuestionsExtracted,
                 );
-                controller.addJavaScriptHandler(
-                  handlerName: 'onFrameHtml',
-                  callback: _handleFrameHtml,
-                );
               },
               onLoadStop: (controller, url) async {
-                // 新页面：清掉上一页的 frame 快照，等这次上报
-                _frameHtmls.clear();
-                _frameTitles.clear();
                 _currentPageUrl = url?.toString();
                 _dropStaleAnswers(_currentPageUrl);
                 _log('页面加载完成，正在探测题目节点...');
@@ -1066,10 +1135,7 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
                 _syncCanGoBack();
               },
               onUpdateVisitedHistory: (controller, url, isReload) {
-                // SPA 站内跳转不一定触发 onLoadStop，这里也清一次，
-                // 否则「提取本页作业」可能拿到上一个页面的旧快照。
-                _frameHtmls.clear();
-                _frameTitles.clear();
+                // SPA 站内跳转不一定触发 onLoadStop，这里同步一次当前地址
                 _currentPageUrl = url?.toString();
                 _syncCanGoBack();
               },
@@ -1091,4 +1157,30 @@ class _WorkWebViewPageState extends State<WorkWebViewPage> {
       ),
     );
   }
+}
+
+/// 用户点击后读到的一批结构化字段（一次性，用完即弃）。
+///
+/// **字段只有四个**：域名、页面标题、课程名提示、行数据。
+/// 没有 HTML、没有隐藏域、没有 Cookie、没有页面内部 id 列表——
+/// 上一版把节点 `outerHTML` 传回 Dart 的做法已经彻底移除。
+class _PageRows {
+  const _PageRows({
+    required this.host,
+    required this.pageTitle,
+    required this.courseName,
+    required this.rows,
+  });
+
+  /// 脱敏后的域名，只用于日志
+  final String host;
+
+  /// document.title（≤120 字）
+  final String pageTitle;
+
+  /// 页面上读到的课程名（≤40 字，可能为空）
+  final String courseName;
+
+  /// 作业行 / 课程卡片，字段由 `assets/js/page_reader.js` 白名单决定
+  final List<Map<String, dynamic>> rows;
 }

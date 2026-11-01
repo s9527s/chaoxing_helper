@@ -27,9 +27,11 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.2.2
+  flutter_secure_storage: ^9.0.0
   dio: ^5.4.0
   flutter_inappwebview: ^6.1.5
-  html: ^0.15.7
+  # 刻意不依赖 html 解析包：网页数据由 assets/js/page_reader.js 先在 DOM 里
+  # 挑成结构化字段，Dart 侧只接收 JSON 字段，不接收 HTML 字符串。
 
 dev_dependencies:
   flutter_test:

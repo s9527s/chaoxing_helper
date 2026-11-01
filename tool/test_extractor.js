@@ -286,6 +286,45 @@ console.log('— 只读性检查 —');
   check('原有输入值没被改动', fingerprint.values, ['初始值', '草稿']);
 }
 
+
+console.log('— 隐藏内容不外泄 —');
+{
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">1. 下列哪个是质数？</div>
+      <ul class="Zy_ulTop"><li>A. 4</li><li>B. 7</li></ul>
+      <div class="mark_answer" style="display:none">正确答案：B</div>
+      <div style="display:none">学生姓名：张三 学号 20230001</div>
+      <div aria-hidden="true">aria 隐藏提示</div>
+      <script>var answerKey = 'SCRIPT-SECRET';</script>
+      <input type="hidden" name="workEnc" value="SECRET-WORK-ENC">
+    </div>`;
+  const { payload } = run(html);
+  const serialized = JSON.stringify(payload);
+  check('题干正常取到', payload.questions[0].stem, '1. 下列哪个是质数？');
+  check('选项正常取到', payload.questions[0].options.map((o) => o.text), ['A. 4', 'B. 7']);
+  check('隐藏的正确答案没有被带出来', serialized.indexOf('正确答案：B') === -1, true);
+  check('隐藏的个人信息没有被带出来', serialized.indexOf('20230001') === -1, true);
+  check('aria-hidden 文字没有被带出来', serialized.indexOf('aria 隐藏提示') === -1, true);
+  check('script 内容没有被带出来', serialized.indexOf('SCRIPT-SECRET') === -1, true);
+  check('隐藏表单字段没有被带出来', serialized.indexOf('SECRET-WORK-ENC') === -1, true);
+}
+
+{
+  // 题干只有类型标签时走 fallbackStem：同样不能把隐藏的答案区读进来
+  const html = `
+    <div class="TiMu">
+      <div class="Zy_TItle">简答题（10分）</div>
+      <div class="qtContent">请简述 TCP 三次握手的过程。</div>
+      <div style="display:none">参考答案：先 SYN 再 SYN+ACK 最后 ACK</div>
+      <textarea></textarea>
+    </div>`;
+  const { payload } = run(html);
+  const stem = payload.questions[0].stem;
+  check('正文兜底取到可见正文', stem.indexOf('TCP 三次握手') !== -1, true);
+  check('正文兜底不含隐藏的参考答案', stem.indexOf('参考答案') === -1, true);
+}
+
 console.log('');
 if (failed === 0) {
   console.log('全部通过');

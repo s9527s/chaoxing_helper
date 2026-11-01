@@ -35,12 +35,20 @@ void main() {
   ///
   /// 带 `readonly-audit-ok` 标记的行会被跳过——这是唯一的人工豁免通道，
   /// 且标记数量本身也受下面的用例约束（不许到处撒）。
+  /// 纯注释行（`//`、`///`、块注释的 `*`）也跳过：守卫要拦的是可执行代码，
+  /// 而注释里恰恰会写「这里刻意不使用 xxx」这类说明。
   List<String> scan(List<File> files, List<RegExp> patterns) {
     final hits = <String>[];
     for (final file in files) {
       final lines = file.readAsLinesSync();
       for (var i = 0; i < lines.length; i++) {
         if (lines[i].contains('readonly-audit-ok')) continue;
+        final trimmed = lines[i].trimLeft();
+        if (trimmed.startsWith('//') ||
+            trimmed.startsWith('*') ||
+            trimmed.startsWith('/*')) {
+          continue;
+        }
         for (final pattern in patterns) {
           if (pattern.hasMatch(lines[i])) {
             hits.add('${file.path}:${i + 1} → ${lines[i].trim()}');
@@ -104,18 +112,15 @@ void main() {
     test('提取脚本只用 querySelector 读文字（抽样确认）', () {
       final js = File('assets/js/extractor.js').readAsStringSync();
       expect(js.contains('querySelectorAll'), isTrue);
-      expect(js.contains('textContent') || js.contains('innerText'), isTrue);
-      // 唯一的 removeChild 必须作用在脱离文档的副本上
-      if (js.contains('removeChild')) {
-        expect(
-          js.contains('cloneNode(true)'),
-          isTrue,
-          reason: 'removeChild 若不在 cloneNode 副本上，会改到真实 DOM',
-        );
-      }
+      expect(js.contains('innerText'), isTrue);
+      // 文本读取改成纯遍历：不再 clone、不再 removeChild，页面零改动
+      expect(js.contains('cloneNode'), isFalse);
+      expect(js.contains('removeChild'), isFalse);
+      // 只允许主框架往 Flutter 抛数据
+      expect(js.contains('window.top !== window.self'), isTrue);
     });
 
-    test('只读豁免标记全仓库至多 1 处，且只允许在提取脚本里', () {
+    test('全仓库没有任何只读豁免标记（当前为 0 处）', () {
       final hits = <String>[];
       final files = <File>[
         ...collect('lib', <String>['.dart']),
@@ -130,13 +135,69 @@ void main() {
         }
       }
       expect(
-        hits.length,
-        lessThanOrEqualTo(1),
-        reason: '豁免标记被到处使用，等于没守卫：${hits.join(', ')}',
+        hits,
+        isEmpty,
+        reason: '出现人工豁免就意味着守卫被绕过：${hits.join(', ')}',
       );
-      if (hits.isNotEmpty) {
-        expect(hits.single, contains('extractor.js'));
+    });
+  });
+
+  group('红线一之二：只交字段，不交页面结构', () {
+    test('lib/ 与 assets/ 里完全不出现 outerHTML / innerHTML', () {
+      final hits = scan(<File>[
+        ...collect('lib', <String>['.dart']),
+        ...collect('assets', <String>['.js']),
+      ], <RegExp>[
+        RegExp(r'outerHTML'),
+        RegExp(r'innerHTML'),
+      ]);
+      expect(
+        hits,
+        isEmpty,
+        reason: '页面结构不得整段交给 Dart（连长度统计都不允许）：\n${hits.join('\n')}',
+      );
+    });
+
+    test('注入脚本不读 Cookie / 存储 / 跨帧文档', () {
+      final hits = scan(collect('assets', <String>['.js']), <RegExp>[
+        RegExp(r'document\.cookie'),
+        RegExp(r'localStorage'),
+        RegExp(r'sessionStorage'),
+        RegExp(r'contentDocument'),
+        RegExp(r'contentWindow'),
+      ]);
+      expect(hits, isEmpty, reason: '脚本越界读了不该读的东西：\n${hits.join('\n')}');
+    });
+
+    test('Dart 侧不再解析 HTML 字符串', () {
+      final src =
+          File('lib/data/services/scanner_service.dart').readAsStringSync();
+      for (final banned in <String>[
+        'package:html',
+        'html_parser',
+        'parseTasksFromHtml',
+        'parseCourseListHtml',
+        'outerHTML',
+      ]) {
+        expect(
+          src.contains(banned),
+          isFalse,
+          reason: '扫描服务仍在处理 HTML：命中 $banned',
+        );
       }
+      // 只保留结构化入口
+      expect(src.contains('parseTaskRows'), isTrue);
+      expect(src.contains('parseCourseRows'), isTrue);
+    });
+
+    test('页面读取脚本只暴露 tasks / courses 两个方法', () {
+      final js = File('assets/js/page_reader.js').readAsStringSync();
+      expect(js.contains('window.__cxPageReader'), isTrue);
+      expect(js.contains('tasks: function'), isTrue);
+      expect(js.contains('courses: function'), isTrue);
+      // 只读兜底：不能出现任何写操作
+      expect(js.contains('.click('), isFalse);
+      expect(js.contains('setAttribute'), isFalse);
     });
   });
 
@@ -166,6 +227,36 @@ void main() {
       final src = File('lib/core/network/cookie_sync_helper.dart').readAsStringSync();
       expect(src.contains('i.chaoxing.com/base'), isFalse);
       expect(src.contains('_verifyWithServer'), isFalse);
+    });
+
+    test('WebView 页面加载阶段不注入脚本、不采集 HTML', () {
+      final src = File('lib/ui/pages/work_webview_page.dart').readAsStringSync();
+      // frame 上报桥 / 文档启动即注入，都是「页面一加载就抓一份 HTML」的形态
+      for (final banned in <String>[
+        'onFrameHtml',
+        'initialUserScripts',
+        'AT_DOCUMENT_START',
+        'UserScript(',
+      ]) {
+        expect(
+          src.contains(banned),
+          isFalse,
+          reason: '页面加载阶段不得注入采集脚本，命中 $banned',
+        );
+      }
+    });
+
+    test('不再存在任何「刷新取数」服务', () {
+      expect(
+        File('lib/data/services/task_refresh_service.dart').existsSync(),
+        isFalse,
+        reason: '开源版不通过接口拉取学习通数据，刷新服务应已删除',
+      );
+      final hits = scan(collect('lib', <String>['.dart']), <RegExp>[
+        RegExp(r'TaskRefreshService'),
+        RegExp(r'refreshCourses'),
+      ]);
+      expect(hits, isEmpty, reason: '刷新链路残留：\n${hits.join('\n')}');
     });
   });
 

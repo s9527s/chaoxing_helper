@@ -1,6 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:html/dom.dart' as dom;
-import 'package:html/parser.dart' as html_parser;
 
 /// 任务类型：决定点击拦截策略（标准作业可辅助，考试/论文仅提醒）。
 enum HomeworkKind {
@@ -378,11 +376,14 @@ class CourseRef {
   }
 }
 
-/// 页面 HTML 解析服务。
+/// 结构化页面数据 → 领域模型的转换服务。
 ///
-/// 只做**纯解析**：输入是已经拿到手的 HTML 字符串，输出是任务/课程列表。
+/// **不再接收任何 HTML 字符串。** 网页侧（`assets/js/page_reader.js`）在用户
+/// 点击按钮后，直接从 DOM 里挑出几个可见字段，拼成 JSON 数组交给这里；
+/// 本类只做「字段校验 → 状态过滤 → 去重 → 类型判定 → 截止时间解析」，
+/// 不解析标签、不碰隐藏域、不碰 Cookie。
+///
 /// 本身不发起任何网络请求、不创建 WebView、不加载页面。
-/// HTML 的来源要么是每个 frame 自报上来的快照，要么是用户当前正在看的页面。
 class ScannerService {
   ScannerService._();
 
@@ -391,9 +392,6 @@ class ScannerService {
   /// 我的课程列表（仅作为快捷入口的默认入口地址）
   static const String courseListUrl =
       'https://mooc1.chaoxing.com/visit/interaction';
-
-  /// 状态节点：`<p class="status fl">未交</p>`
-  static const String _statusSelector = '.status.fl';
 
   /// 只有命中这些状态词才算「待办」，其余（待批阅 / 已完成 / 已交 …）一律跳过
   static const List<String> _pendingStatusKeywords = <String>[
@@ -423,61 +421,33 @@ class ScannerService {
     r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?',
   );
 
-  // ---------------- HTML 解析 ----------------
+  // ---------------- 结构化数据入口（HTML 不进入 Dart） ----------------
 
-  /// 从一个页面里解析出课程列表（只读 DOM，不点击、不跳转）。
+  /// 把网页里读出来的课程卡片（纯文本 + 链接）转成 [CourseRef]。
   ///
-  /// 「课程入口」批量导入用的就是它：打开学习通课程列表页，
-  /// 点一下「保存全部课程」，一次性把整页的课程卡片存成快捷入口。
-  List<CourseRef> parseCourseListHtml(String html) => _parseCourseList(html);
-
-  /// 解析「我的课程」列表页。
-  ///
-  /// 真实 DOM（`https://mooc1.chaoxing.com/visit/interaction`）：
-  /// ```html
-  /// <a class="color1" href="https://mooc1.chaoxing.com/visit/stucoursemiddle
-  ///       ?courseid=100008001&amp;clazzid=100007001&amp;cpi=100009001&amp;ismooc2=1&amp;v=2"
-  ///    target="_blank">
-  ///   <span class="course-name overHidden2" title="英语四六级">英语四六级</span>
-  ///   <i class="icon-news"></i>
-  /// </a>
-  /// ```
-  /// 课程名优先取 `span.course-name` 文本，其次 `title` 属性；
-  /// courseId / classId 从 href 的 query 里取（学习通有的是 `courseid`+`clazzid`，
-  /// 课程内页用的是 `courseId`+`classId`，这里统一小写比较兼容两种写法）。
-  List<CourseRef> _parseCourseList(String html) {
-    final document = html_parser.parse(html);
+  /// 入参来自 `assets/js/page_reader.js` 的 `courses()`，每项只有两个字段：
+  /// `name`（可见文字）与 `href`（卡片链接）。**没有 HTML 字符串**——
+  /// HTML 解析、DOM 遍历、隐藏字段读取都已经不在 Dart 侧发生。
+  List<CourseRef> parseCourseRows(List<dynamic> rows) {
     final courses = <CourseRef>[];
     final seen = <String>{};
 
-    // 主选择器是课程卡片上的 a.color1；页面改版时退化为所有带 courseid 的链接
-    var anchors = document.querySelectorAll('a.color1');
-    if (anchors.isEmpty) {
-      anchors = document.querySelectorAll('a[href*="courseid="]');
-    }
-    if (anchors.isEmpty) {
-      // 新版课程列表没有 a.color1：从课程名节点往上找到最近的课程链接
-      anchors = _findAnchorsByCourseName(document);
-    }
-    if (anchors.isEmpty) {
-      // 卡片压根不是 <a>，而是 <li onclick="...stucoursemiddle?courseid=...">
-      anchors = _findAnchorsFromOnclick(document);
-    }
+    for (final raw in rows) {
+      if (raw is! Map) continue;
 
-    for (final anchor in anchors) {
-      final href = _normalizeUrl(anchor.attributes['href'] ?? '');
+      final name = _cleanField(raw['name'], 60);
+      if (name.isEmpty) continue;
+
+      final href = _normalizeUrl(_cleanField(raw['href'], 1024));
       final ids = _extractCourseIds(href);
       if (ids == null) continue;
-
-      final courseName = _readCourseName(anchor);
-      if (courseName.isEmpty) continue;
 
       // 同一门课在页面上可能出现多次（图标、标题各一个 a）
       if (!seen.add('${ids.$1}|${ids.$2}')) continue;
 
       courses.add(
         CourseRef(
-          courseName: courseName,
+          courseName: name,
           courseId: ids.$1,
           classId: ids.$2,
           cpi: ids.$3,
@@ -488,70 +458,6 @@ class ScannerService {
     }
 
     return courses;
-  }
-
-  /// 兜底：从 `.course-name` 之类的课程名节点往上冒泡，找到包着它的课程链接。
-  /// 新版课程列表的 DOM 层级更深，直接选 a 会漏掉。
-  List<dom.Element> _findAnchorsByCourseName(dom.Document document) {
-    final found = <dom.Element>[];
-    final seen = <dom.Element>{};
-
-    for (final node in document.querySelectorAll('[class*="course-name"]')) {
-      var current = node.parent;
-      while (current != null) {
-        if (current.localName == 'a') {
-          final href = current.attributes['href'] ?? '';
-          if (href.toLowerCase().contains('courseid=') && seen.add(current)) {
-            found.add(current);
-          }
-          break;
-        }
-        current = current.parent;
-      }
-    }
-    return found;
-  }
-
-  /// 兜底：卡片本身不是链接，而是 `<li onclick="location='...courseid=...'">`。
-  /// 这里把 onclick 里的地址抽出来，拼成一个合成的 <a>，复用后面的解析逻辑。
-  List<dom.Element> _findAnchorsFromOnclick(dom.Document document) {
-    final found = <dom.Element>[];
-    final seen = <String>{};
-
-    for (final el in document.querySelectorAll('[onclick]')) {
-      final onclick = el.attributes['onclick'] ?? '';
-      if (!onclick.toLowerCase().contains('courseid=')) continue;
-
-      final match = RegExp(r'''['"]([^'"]*courseid=[^'"]*)['"]''')
-          .firstMatch(onclick);
-      final href = (match?.group(1) ?? '').trim();
-      if (href.isEmpty || !seen.add(href)) continue;
-
-      final anchor = dom.Element.tag('a');
-      anchor.attributes['href'] = href;
-      anchor.append(el.clone(true));
-      found.add(anchor);
-    }
-    return found;
-  }
-
-  /// 课程名：`span.course-name` 文本 → 其 title 属性 → a 的 title → a 的纯文本
-  String _readCourseName(dom.Element anchor) {
-    final nameNode =
-        anchor.querySelector('span.course-name') ??
-        anchor.querySelector('.course-name');
-
-    if (nameNode != null) {
-      final text = nameNode.text.trim();
-      if (text.isNotEmpty) return text;
-      final title = nameNode.attributes['title']?.trim() ?? '';
-      if (title.isNotEmpty) return title;
-    }
-
-    final anchorTitle = anchor.attributes['title']?.trim() ?? '';
-    if (anchorTitle.isNotEmpty) return anchorTitle;
-
-    return anchor.text.trim();
   }
 
   /// 从链接里提取 courseId / classId，缺任一则返回 null
@@ -585,91 +491,26 @@ class ScannerService {
     return (courseId!, classId!, cpi, enc);
   }
 
-  /// 供「可见 WebView 抓取」使用：把当前页面的 outerHTML 直接解析成任务列表。
-  /// 绕开作业列表页需要 enc 的问题——页面已经是用户手动打开好的。
-  List<HomeworkItem> parseTasksFromHtml(
-    String html, {
+  /// 把网页里读出来的作业行（纯文本 + 链接）转成 [HomeworkItem]。
+  ///
+  /// 入参来自 `assets/js/page_reader.js` 的 `tasks()`，每项最多 7 个字段：
+  /// `title` / `status` / `deadline`（可见文字）、`workId` / `examId`（data 属性）、
+  /// `url`（行上的 data 链接）、`text`（仅在没有状态节点时给的截断行文本）。
+  ///
+  /// 这里不做任何标签解析：URL 用 [Uri] 拆参，日期用正则从一小段文本里取。
+  List<HomeworkItem> parseTaskRows(
+    List<dynamic> rows, {
     String courseName = '本页作业',
   }) {
-    final items = _parseCourseTasks(
-      CourseRef(courseName: courseName, courseId: '', classId: ''),
-      html,
-    );
-    debugPrint('[Scanner] $courseName: 本页解析出 ${items.length} 条未交作业');
-    return items;
-  }
-
-  /// 「刷新」用：解析一门课的作业列表，同时返回总行数。
-  ///
-  /// 仍然是**纯解析**，不发请求；HTML 由调用方用已登录的 Cookie 取回。
-  TaskListSnapshot parseWorkListSnapshot(
-    String html, {
-    required String courseName,
-  }) {
-    final snapshot = _parseCourseTasksSnapshot(
-      CourseRef(courseName: courseName, courseId: '', classId: ''),
-      html,
-    );
-    debugPrint(
-      '[Scanner] 刷新 $courseName: 共 ${snapshot.totalRows} 行，'
-      '未交 ${snapshot.pendingCount} 条，跳过 ${snapshot.skippedRows} 行',
-    );
-    return snapshot;
-  }
-
-  /// 供单元测试直接喂 HTML 片段，避免依赖网络。
-  @visibleForTesting
-  List<HomeworkItem> parseCourseTasksHtml(
-    String html, {
-    String courseName = '测试课程',
-  }) {
-    return _parseCourseTasks(
-      CourseRef(courseName: courseName, courseId: '', classId: ''),
-      html,
-    );
-  }
-
-  /// 解析课程作业列表页。
-  ///
-  /// 真实 DOM（学习通 mooc2 作业列表）：
-  /// ```html
-  /// <li onclick="goTask(this);" data="https://mooc1.chaoxing.com/.../work/task?courseId=..&amp;workId=..">
-  ///   <div class="tag work-icon icon-zy"></div>
-  ///   <div class="right-content">
-  ///     <p class="overHidden2 fl">作业20260926</p>
-  ///     <p class="status fl">未交</p>
-  ///   </div>
-  /// </li>
-  /// ```
-  List<HomeworkItem> _parseCourseTasks(CourseRef course, String html) =>
-      _parseCourseTasksSnapshot(course, html).pending;
-
-  TaskListSnapshot _parseCourseTasksSnapshot(CourseRef course, String html) {
-    final document = html_parser.parse(html);
     final items = <HomeworkItem>[];
     final seen = <String>{};
     var skippedByStatus = 0;
     var duplicateCount = 0;
-    var totalRows = 0;
 
-    // 只认真正的作业行：学习通的作业 li 带 onclick="goTask(this)" 且 data 里有 workId/exam。
-    // 不能退化成"所有 li"或"所有 a[href]"——侧边栏（进入空间/章节/资料/错题集）会被误判成作业。
-    var nodes = document.querySelectorAll(
-      'li[onclick*="goTask"], li[data*="workId"], li[data*="/work/"], li[data*="/exam/"]',
-    );
-    if (nodes.isEmpty) {
-      // 退化：只接受 data 指向作业/考试的 li，绝不吃侧边栏（/visit/…）菜单
-      nodes = document.querySelectorAll('li[data]').where((node) {
-        final data = (node.attributes['data'] ?? '').toLowerCase();
-        return data.contains('/work') ||
-            data.contains('workid') ||
-            data.contains('/exam');
-      }).toList();
-    }
+    for (final raw in rows) {
+      if (raw is! Map) continue;
 
-    for (final node in nodes) {
-      final rawUrl = node.attributes['data'] ?? '';
-      final url = _normalizeUrl(rawUrl);
+      final url = _normalizeUrl(_cleanField(raw['url'], 1024));
       if (url.isEmpty) continue;
 
       // 最后一道闸：地址必须像作业/考试，否则丢弃
@@ -680,34 +521,36 @@ class ScannerService {
         continue;
       }
 
-      // 能走到这里就算「页面上的一行作业」，无论最后是未交还是已交
-      totalRows++;
-
-      final title = _readTaskTitle(node);
-      final statusText = _readTaskStatus(node);
+      final title = _cleanField(raw['title'], 120);
+      final status =
+          _cleanField(raw['status'], 24).replaceAll(RegExp(r'\s+'), '');
+      final rowText =
+          _cleanField(raw['text'], 200).replaceAll(RegExp(r'\s+'), '');
 
       // ---- 状态过滤：只保留「未交 / 待交」这类待办 ----
-      if (statusText.isNotEmpty) {
-        if (!_isPendingStatus(statusText)) {
+      if (status.isNotEmpty) {
+        if (!_isPendingStatus(status)) {
           skippedByStatus++;
           continue;
         }
-      } else if (_rowLooksClosed(node.text.replaceAll(RegExp(r'\s+'), ''))) {
-        // 页面没有单独的状态节点，但整行文字里写着「待批阅 / 已完成」等
+      } else if (rowText.isNotEmpty && _rowLooksClosed(rowText)) {
+        // 页面没有单独的状态节点，但行文字里写着「待批阅 / 已完成」等
         skippedByStatus++;
         continue;
       }
 
       // ---- 去重：优先 workId / examId，没有才退化到「标题 + 截止时间」 ----
-      // 绝不用整条 URL：列表页每次刷新 URL 上的 answerId/enc 都会变，
-      // 同一个作业会被当成两条，看板数量就虚增了。
       final kind = _inferKind(url: url, title: title);
       final displayTitle = title.isEmpty ? kind.label : title;
-      final taskKey = _extractTaskKey(url, node);
-      final deadline = _tryParseDeadline(node.text);
+      final taskKey = _taskKeyOf(
+        workId: _cleanField(raw['workId'], 32),
+        examId: _cleanField(raw['examId'], 32),
+        url: url,
+      );
+      final deadline = _tryParseDeadline(_cleanField(raw['deadline'], 32));
       final identity =
           taskKey ??
-          'sig:${course.courseName}|$displayTitle|'
+          'sig:$courseName|$displayTitle|'
               '${deadline?.toIso8601String() ?? ''}';
       if (!seen.add(identity)) {
         duplicateCount++;
@@ -716,11 +559,11 @@ class ScannerService {
 
       items.add(
         HomeworkItem(
-          courseName: course.courseName,
+          courseName: courseName,
           title: displayTitle,
           kind: kind,
           url: url,
-          status: statusText.isEmpty ? '未知' : statusText,
+          status: status.isEmpty ? '未知' : status,
           deadline: deadline,
           identity: taskKey,
         ),
@@ -729,36 +572,12 @@ class ScannerService {
 
     if (skippedByStatus > 0 || duplicateCount > 0) {
       debugPrint(
-        '[Scanner] ${course.courseName}: 跳过非待办 $skippedByStatus 条，'
+        '[Scanner] $courseName: 跳过非待办 $skippedByStatus 条，'
         '去重 $duplicateCount 条，保留 ${items.length} 条',
       );
     }
 
-    return TaskListSnapshot(
-      pending: items,
-      totalRows: totalRows,
-      skippedRows: skippedByStatus + duplicateCount,
-    );
-  }
-
-  /// 读取任务状态。不同皮肤分别放在 `.status.fl` / `.status` / `.zt` / `.state` 里。
-  String _readTaskStatus(dom.Element node) {
-    const selectors = <String>[
-      _statusSelector,
-      '.status',
-      '[class*="status"]',
-      '.zt',
-      '.state',
-      '[class*="state"]',
-    ];
-
-    for (final selector in selectors) {
-      final el = node.querySelector(selector);
-      if (el == null) continue;
-      final text = el.text.replaceAll(RegExp(r'\s+'), '');
-      if (text.isNotEmpty) return text;
-    }
-    return '';
+    return items;
   }
 
   /// 是否属于待办状态（未交 / 待交 / 未提交 …）
@@ -769,19 +588,16 @@ class ScannerService {
   bool _rowLooksClosed(String rowText) =>
       _closedStatusKeywords.any(rowText.contains);
 
-  /// 提取唯一标识：`data-workid` 属性 → URL 里的 workId/examId → 路径里的数字 id。
+  /// 提取唯一标识：workId → examId → URL 里的 workId/examId → 路径里的数字 id。
+  ///
   /// 网页上重发或多行重复时，同一个 workId 只会保留第一条。
-  String? _extractTaskKey(String url, dom.Element node) {
-    for (final name in <String>[
-      'data-workid',
-      'data-work-id',
-      'workid',
-      'data-examid',
-      'examid',
-    ]) {
-      final value = node.attributes[name]?.trim() ?? '';
-      if (value.isNotEmpty) return 'wid:$value';
-    }
+  String? _taskKeyOf({
+    required String workId,
+    required String examId,
+    required String url,
+  }) {
+    if (workId.isNotEmpty) return 'wid:$workId';
+    if (examId.isNotEmpty) return 'eid:$examId';
 
     final uri = Uri.tryParse(url);
     if (uri == null) return null;
@@ -803,64 +619,19 @@ class ScannerService {
     return null;
   }
 
-  /// 读取任务标题。
-  /// 作业列表页在不同皮肤下结构不同：mooc2 用 `.overHidden2.fl`，
-  /// 课程主页的作业页只有「作业 / 作业20261030 / 待批阅」这样的纯文本行，
-  /// 所以这里做选择器 + 行文本双重兜底，避免标题退化成类型名。
-  String _readTaskTitle(dom.Element node) {
-    const selectors = <String>[
-      '.overHidden2.fl',
-      '.overHidden2',
-      '[class*="overHidden"]',
-      '.titTxt',
-      '.tit',
-      '.title',
-    ];
-
-    for (final selector in selectors) {
-      final el = node.querySelector(selector);
-      final text = el?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
-      if (text.isNotEmpty) return text;
-    }
-
-    // 行文本兜底：过滤掉类型徽标与状态词，取第一个像标题的片段
-    const noise = <String>{
-      '作业',
-      '考试',
-      '任务',
-      '待批阅',
-      '未交',
-      '已交',
-      '已完成',
-      '待完成',
-      '进行中',
-      '未开始',
-      '进行中（10）',
-      '暂无',
-    };
-
-    final parts = node.text
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim()
-        .split(' ')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty);
-
-    for (final part in parts) {
-      if (noise.contains(part)) continue;
-      if (RegExp(r'^[\d\s:：/.-]+$').hasMatch(part)) continue;
-      return part;
-    }
-
-    return '';
+  /// 字段清洗：非字符串一律丢弃，压缩空白并截断，避免超长内容进内存/日志
+  static String _cleanField(dynamic value, int max) {
+    if (value is! String) return '';
+    final text = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return text.length > max ? text.substring(0, max) : text;
   }
 
-  /// 处理 HTML 实体与相对路径：`&amp;` → `&`，`//`、`/` 补全为绝对地址
+  /// 处理相对路径与历史遗留的实体编码：`&amp;` → `&`，`//`、`/` 补全为绝对地址
   String _normalizeUrl(String raw) {
     var url = raw.trim();
     if (url.isEmpty) return '';
 
-    // html 包通常已解实体，这里兜住二次编码的情况
+    // 少数皮肤把地址写在属性里时仍然带实体，这里兜住
     url = url.replaceAll('&amp;', '&').replaceAll('&#38;', '&');
     // 去掉包裹的引号
     if ((url.startsWith('"') && url.endsWith('"')) ||
