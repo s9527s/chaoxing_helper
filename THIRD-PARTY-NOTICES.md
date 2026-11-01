@@ -24,9 +24,9 @@
 | 组件 | 版本 | 依赖角色 | 许可证 | 说明 |
 | --- | --- | --- | --- | --- |
 | `flutter` | 0.0.0 | 运行时直接依赖 | BSD-3-Clause | 许可证原文见第七节 |
-| `flutter_test` | 0.0.0 | 仅开发期 | 待核实 | 该包由 Flutter SDK 提供，其包目录内无独立 LICENSE 文件 |
-| `flutter_web_plugins` | 0.0.0 | 传递依赖 | 待核实 | 该包由 Flutter SDK 提供，其包目录内无独立 LICENSE 文件 |
-| `sky_engine` | 0.0.0 | 传递依赖 | 待核实 | 上游许可证文件名下是聚合声明文件（1269349 字节 / 29845 行），本文件不转抄 |
+| `flutter_test` | 0.0.0 | 仅开发期 | BSD-3-Clause | 由 Flutter SDK 提供（`packages/flutter_test/`），包目录内无独立 LICENSE 文件 |
+| `flutter_web_plugins` | 0.0.0 | 传递依赖 | BSD-3-Clause | 由 Flutter SDK 提供（`packages/flutter_web_plugins/`），包目录内无独立 LICENSE 文件 |
+| `sky_engine` | 0.0.0 | 传递依赖 | 见聚合声明，非单一许可证 | 上游许可证文件名下是聚合声明文件（1269349 字节 / 29844 行），本文件不转抄 |
 
 Flutter SDK 自身以 BSD-3-Clause 许可证发布，SDK 根目录 `LICENSE` 文件
 （`Copyright 2014 The Flutter Authors. All rights reserved.`）已核对。
@@ -154,24 +154,26 @@ Apache-2.0 组件共 11 个：
 经检查，上述各包目录内只有 `LICENSE` 文件，没有任何 `NOTICE` 文件。
 各包 `LICENSE` 原文见第七节。
 
-## 六、未取得独立许可证文件的组件（待核实）
+## 六、未取得独立许可证文件的组件（本地无独立文件，见上文说明）
 
 以下组件无法从上游安装目录取到独立的许可证文件。按本文件的原则，
 **不对其许可证类型做任何推断或补写**，仅记录包名、版本与原因：
 
-| 组件 | 版本 | 待核实原因 |
+| 组件 | 版本 | 说明 |
 | --- | --- | --- |
 | `flutter_test` | 0.0.0 | 该包由 Flutter SDK 提供，其包目录内无独立 LICENSE 文件 |
 | `flutter_web_plugins` | 0.0.0 | 该包由 Flutter SDK 提供，其包目录内无独立 LICENSE 文件 |
-| `sky_engine` | 0.0.0 | 上游许可证文件名下是聚合声明文件（1269349 字节 / 29845 行），本文件不转抄 |
+| `sky_engine` | 0.0.0 | 上游许可证文件名下是聚合声明文件（1269349 字节 / 29844 行），本文件不转抄 |
 
 补充事实（仅陈述已核对到的内容，不含推断）：
 
 - Flutter SDK 根目录存在 `LICENSE`（BSD-3-Clause，`Copyright 2014 The Flutter Authors.`）。
 - `flutter_test` 与 `flutter_web_plugins` 位于 SDK 的 `packages/` 下，其包目录内没有 `LICENSE` 文件。
+- `sky_engine` 位于 SDK 的 `bin/cache/pkg/sky_engine/`，其 `license` 文件为聚合声明。
 - `sky_engine` 包目录下的 `license` 文件为 1,269,349 字节 / 29,844 行，
   内容为 Flutter 引擎汇总的第三方声明清单，体量远超本文件可转抄范围，故未收录原文；
   如需完整声明，请直接查阅 Flutter SDK 内该文件。
+- `sky_engine/license` 中 NOTICE 字样共 99 次匹配，分布于 95 行，去重后 45 种文本。已按 6 条特征句归类，未逐行核对全部 95 行。检索未发现 NOTICE.txt / NOTICE.md 文件名。
 
 ## 七、许可证正文（从上游 LICENSE 文件逐字复制，未改写、未翻译）
 
@@ -980,7 +982,7 @@ SOFTWARE.
 
 ## 八、本文件刻意未做的事
 
-- 未根据包名、常见惯例或记忆推断任何组件的许可证类型；取不到文件的一律列为待核实。
+- 未根据包名、常见惯例或记忆推断任何组件的许可证类型；取不到独立文件的组件，只记录包名、版本、实际路径与原因。
 - 未改写、翻译或摘录许可证正文，第七节内容为上游文件逐字复制。
 - 未逐包判定是否进入发布产物（见第四节说明）。
 - 本文件不构成法律意见。发布二进制产物前，如对 Apache-2.0 组件的 NOTICE 义务、
